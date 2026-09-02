@@ -391,6 +391,15 @@ def load_confirmed_object_db_document(review_output_root: str) -> dict:
     return build_object_db_from_review_records(review_output_root, load_confirmed_records(review_output_root))
 
 
+def export_confirmed_object_db(review_output_root: str) -> str:
+    """confirmed 후보들을 object_db_new.json으로 통합 출력. 8번 매칭/선별의 입력이 됨. 저장 경로 반환."""
+    document = load_confirmed_object_db_document(review_output_root)
+    output_path = os.path.join(review_output_root, "object_db_new.json")
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(document, fh, ensure_ascii=False, indent=2)
+    return output_path
+
+
 def delete_negative(candidate: ReviewCandidate, output_root: str) -> dict:
     result = get_negative_save_result(candidate, output_root)
     _delete_if_exists(result["imagePath"])

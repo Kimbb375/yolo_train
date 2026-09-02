@@ -15,6 +15,7 @@ import tifffile
 from PIL import Image
 
 import inference
+import review
 from objectdb import CoordinateBox
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,8 +126,47 @@ def check_real_inference_pipeline() -> None:
           "candidates.json 생성까지 파이프라인 전체 확인.")
 
 
+def check_memory_mode_resume() -> None:
+    assert os.path.isfile(BASE_MODEL), f"base model not found: {BASE_MODEL}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        source_root = os.path.join(tmp, "source")
+        os.makedirs(source_root, exist_ok=True)
+        tif_a = os.path.join(source_root, "00001.tif")
+        tif_b = os.path.join(source_root, "00002.tif")
+        tifffile.imwrite(tif_a, np.zeros((900, 900, 3), dtype="uint8"))
+        tifffile.imwrite(tif_b, np.zeros((900, 900, 3), dtype="uint8"))
+
+        output_root = os.path.join(tmp, "output")
+        options = "tile_mode=memory, tile=640, overlap=0.2, conf=0.5, iou=0.6, imgsz=640, device=cpu, batch=1, max_det=50"
+
+        # 1단계: tif_a만으로 먼저 돌려서 run_root에 진행 상황을 남김 (중간에 팅긴 상황 재현)
+        result_a = inference.run(tif_a, output_root, BASE_MODEL, "resume_smoke", options)
+        by_tif_root = os.path.join(result_a.runRootPath, "candidates_by_tif")
+        assert os.path.isfile(os.path.join(by_tif_root, "00001.json"))
+        assert not os.path.isfile(os.path.join(by_tif_root, "00002.json"))
+
+        # 2단계: 같은 run_name으로 폴더 전체(00001+00002)를 다시 지정 -> resume 기본값(1)이라
+        # 00001은 재추론 없이 건너뛰고 00002만 이어서 처리해야 함
+        result_full = inference.run(source_root, output_root, BASE_MODEL, "resume_smoke", options)
+        assert result_full.runRootPath == result_a.runRootPath
+        assert os.path.isfile(os.path.join(by_tif_root, "00002.json"))
+
+        with open(os.path.join(result_full.runRootPath, "progress.json"), encoding="utf-8") as fh:
+            progress = json.load(fh)
+        assert progress["completedFiles"] == 2, progress
+
+        # candidates.json은 review.load_candidates가 바로 읽을 수 있는 스키마여야 함
+        candidates = review.load_candidates(result_full.candidateJsonPath)
+        assert all(c.sourceTifName in ("00001.tif", "00002.tif") for c in candidates)
+
+    print("OK: tile_mode=memory - resume이 이미 끝난 tif(candidates_by_tif/*.json)는 건너뛰고 "
+          "나머지만 이어서 처리(progress.json.completedFiles) + candidates.json이 review.py와 호환.")
+
+
 if __name__ == "__main__":
     check_enumerate_tiles()
     check_read_and_merge_candidates()
     check_save_candidate_assets()
     check_real_inference_pipeline()
+    check_memory_mode_resume()

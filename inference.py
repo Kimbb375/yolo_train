@@ -1,11 +1,14 @@
 """6번 원본 추론: 원본 TIF -> 내부 타일링 -> YOLO 추론 -> candidates.json.
 
-C# InferenceTilingRunner.cs 포팅. 5번(학습)과 같은 패턴으로 trainer/infer_tiles.py를
-서브프로세스 없이 같은 프로세스 안에서 import해서 실행함 (trainerscript.py 공용).
+C# InferenceTilingRunner.cs 포팅. 5번(학습)과 같은 패턴으로 trainer/infer_tiles.py 또는
+trainer/infer_tif_memory.py를 서브프로세스 없이 같은 프로세스 안에서 import해서 실행함
+(trainerscript.py 공용).
 
-범위: C# 원본의 'full'(디스크 타일링) 경로만 포팅함. 'memory' 타일 모드
-(trainer/infer_tif_memory.py, 디스크에 타일 안 쓰고 메모리에서 바로 추론)는 아직 미포함
-— docs/pyside6-env-setup.md 참고.
+옵션 tile_mode=full(기본, 디스크에 타일 PNG를 먼저 써두고 infer_tiles.py로 일괄 추론)
+vs tile_mode=memory(trainer/infer_tif_memory.py, 디스크에 타일 안 쓰고 tif 하나씩
+메모리에서 바로 추론, resume 기본 지원 — 중간에 에러로 중단돼도 같은 run_name으로
+다시 돌리면 이미 끝난 tif는 건너뛰고 이어서 처리함). C# 원본 기본값도 tile_mode=full이라
+전체 기본 동작은 그대로고, memory 모드는 명시적으로 옵션을 켜야 씀.
 """
 
 from __future__ import annotations
@@ -330,6 +333,28 @@ def _candidate_to_dict(candidate: dict) -> dict:
     }
 
 
+def _run_memory(source_tif_folder: str, output_root: str, model_path: str, run_name: str,
+                 run_root: str, option_text: str) -> InferenceRunResult:
+    """C# InferenceTilingRunner의 tile_mode=memory 경로 포팅. 디스크에 타일을 쓰지 않고
+    trainer/infer_tif_memory.py가 tif 하나씩 메모리에서 바로 추론 -> candidates_by_tif/에
+    진행 상황을 남김. resume(기본 true) 옵션이 켜져 있으면 같은 run_name으로 다시 돌릴 때
+    이미 끝난 tif는 건너뛰고 이어서 처리함(에러로 중단된 경우 복구용)."""
+    os.makedirs(run_root, exist_ok=True)
+    trainerscript.run("infer_tif_memory", [
+        "--source", source_tif_folder,
+        "--model", model_path,
+        "--output", output_root,
+        "--run_name", run_name,
+        "--options", option_text,
+    ])
+    candidate_json_path = os.path.join(run_root, "candidates.json")
+    with open(candidate_json_path, encoding="utf-8") as fh:
+        document = json.load(fh)
+    return InferenceRunResult(
+        runRootPath=run_root, tilesRootPath="", candidateJsonPath=candidate_json_path,
+        tileCount=document.get("tileCount", 0), candidateCount=document.get("candidateCount", 0))
+
+
 def run(source_tif_folder: str, output_root: str, model_path: str, run_name: Optional[str],
         option_text: str) -> InferenceRunResult:
     options = _parse_option_text(option_text)
@@ -342,6 +367,10 @@ def run(source_tif_folder: str, output_root: str, model_path: str, run_name: Opt
 
     run_name = (run_name or "").strip() or f"infer_{datetime.now():%Y%m%d_%H%M%S}"
     run_root = os.path.join(output_root, run_name)
+
+    if _get_str(options, "tile_mode", "full").lower() == "memory":
+        return _run_memory(source_tif_folder, output_root, model_path, run_name, run_root, option_text)
+
     tiles_root = os.path.join(run_root, "tiles")
     predict_root = os.path.join(run_root, "predict")
     _reset_directory(run_root)

@@ -101,6 +101,31 @@ def check_confirm_negative_delete_cycle() -> None:
     print("OK: confirmed/negative 저장 -> 취소(append-only 이력 유지) 전체 사이클 검증.")
 
 
+def check_export_object_db() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        candidate_json_path, _ = _build_candidates_json(tmp)
+        candidates = review.load_candidates(candidate_json_path)
+        output_root = os.path.join(tmp, "review_output")
+
+        review.save_confirmed(candidates[0], output_root)
+        review.save_negative(candidates[1], output_root)
+
+        path = review.export_confirmed_object_db(output_root)
+        assert path == os.path.join(output_root, "object_db_new.json")
+        assert os.path.isfile(path)
+
+        with open(path, encoding="utf-8") as fh:
+            document = json.load(fh)
+        assert document["objectCount"] == 1
+        assert document["tileCount"] == 1
+        assert document["objects"][0]["className"] == "whale"
+        # negative(candidate 2)는 confirmed가 아니므로 통합 출력에서 빠져야 함
+        assert all(obj["globalBox"]["left"] != 700 for obj in document["objects"])
+
+    print("OK: export_confirmed_object_db가 object_db_new.json 통합 출력(confirmed만) 생성.")
+
+
 if __name__ == "__main__":
     check_load_and_filter()
     check_confirm_negative_delete_cycle()
+    check_export_object_db()

@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import sys
 from typing import Optional
 
@@ -483,21 +484,27 @@ class InferenceTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._worker: BackgroundCallWorker | None = None
+        self._selected_files: list[str] = []
 
         self.source_input = QLineEdit()
+        self.source_input.textEdited.connect(self._on_source_edited_by_user)
         self.model_input = QLineEdit()
         self.output_input = QLineEdit()
         self.name_input = QLineEdit()
         self.options_input = QLineEdit(
-            "tile=640, overlap=0.2, conf=0.1, iou=0.6, imgsz=640, batch=auto, device=0, "
-            "max_det=300, merge_iou=0.5, candidate_crop=640, candidate_context=120, candidate_view=tile")
+            "tile_mode=memory, resume=1, tile=640, overlap=0.2, conf=0.1, iou=0.6, imgsz=640, batch=auto, "
+            "device=0, max_det=300, merge_iou=0.5, candidate_crop=640, candidate_context=120, candidate_view=tile")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+
+        source_buttons = QHBoxLayout()
+        source_buttons.addWidget(self._browse_button(self._pick_source, "폴더 선택..."))
+        source_buttons.addWidget(self._browse_button(self._pick_source_files, "파일 선택(다중)..."))
 
         form = QGridLayout()
         form.addWidget(QLabel("원본 TIF 폴더/파일"), 0, 0)
         form.addWidget(self.source_input, 0, 1)
-        form.addWidget(self._browse_button(self._pick_source), 0, 2)
+        form.addLayout(source_buttons, 0, 2)
 
         form.addWidget(QLabel("모델 pt"), 1, 0)
         form.addWidget(self.model_input, 1, 1)
@@ -527,15 +534,36 @@ class InferenceTab(QWidget):
         layout.addWidget(self.log, stretch=1)
 
     @staticmethod
-    def _browse_button(handler) -> QPushButton:
-        button = QPushButton("찾기...")
+    def _browse_button(handler, label: str = "찾기...") -> QPushButton:
+        button = QPushButton(label)
         button.clicked.connect(handler)
         return button
 
     def _pick_source(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "원본 TIF 폴더 선택")
         if path:
+            self._selected_files = []
             self.source_input.setText(path)
+
+    def _pick_source_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "원본 TIF 파일 선택 (여러 개 가능)", "", "TIF images (*.tif *.tiff)")
+        if not paths:
+            return
+        self._selected_files = paths
+        self.source_input.setText(self._summarize_selected_files(paths))
+
+    def _on_source_edited_by_user(self, _text: str) -> None:
+        # 파일 다중선택 후 요약 텍스트가 표시된 상태에서 사용자가 직접 입력창을 고치면
+        # 선택된 파일 목록은 더 이상 유효하지 않음 -> 입력창 텍스트를 그대로 씀.
+        self._selected_files = []
+
+    @staticmethod
+    def _summarize_selected_files(paths: list[str]) -> str:
+        names = sorted(os.path.basename(p) for p in paths)
+        first_digits = re.match(r"\d+", names[0])
+        label = first_digits.group(0) if first_digits else names[0]
+        return f"{label}번부터 총 {len(names)}개 tif 선택됨"
 
     def _pick_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
@@ -548,7 +576,7 @@ class InferenceTab(QWidget):
             self.output_input.setText(path)
 
     def _on_start_clicked(self) -> None:
-        source = self.source_input.text().strip()
+        source = ";".join(self._selected_files) if self._selected_files else self.source_input.text().strip()
         model_path = self.model_input.text().strip()
         output_root = self.output_input.text().strip()
         if not source or not model_path or not output_root:
@@ -605,6 +633,9 @@ class ReviewTab(QWidget):
         self.output_root_input = QLineEdit()
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("예: conf>=0.3, width>=20")
+        self.filter_input.textChanged.connect(self._update_filter_status_label)
+        self.filter_status_label = QLabel()
+        self.filter_status_label.setStyleSheet("color: #666;")
         self.jump_input = QSpinBox()
         self.jump_input.setRange(1, 1000)
         self.jump_input.setValue(1)
@@ -642,15 +673,19 @@ class ReviewTab(QWidget):
         self.confirm_button.clicked.connect(self._toggle_confirmed)
         self.negative_button = QPushButton("고래 아님 (X)")
         self.negative_button.clicked.connect(self._toggle_negative)
+        export_button = QPushButton("통합 JSON 내보내기 (object_db_new.json)")
+        export_button.clicked.connect(self._on_export_clicked)
         nav_row.addWidget(prev_button)
         nav_row.addWidget(next_button)
         nav_row.addWidget(self.confirm_button)
         nav_row.addWidget(self.negative_button)
         nav_row.addStretch(1)
+        nav_row.addWidget(export_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(load_row)
+        layout.addWidget(self.filter_status_label)
         layout.addWidget(self.image_label, stretch=1)
         layout.addWidget(self.info_label)
         layout.addLayout(nav_row)
@@ -661,6 +696,22 @@ class ReviewTab(QWidget):
             shortcut = QShortcut(QKeySequence(key), self.image_label)
             shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
             shortcut.activated.connect(handler)
+
+        self._update_filter_status_label()
+
+    def _update_filter_status_label(self) -> None:
+        # conf/area/width/height는 강제되는 기본값이 없음 - 필터 비우면 전체 표시가 기본값.
+        # "지금 몇 이상만 보고 있는지"를 항상 보이게 표기.
+        text = self.filter_input.text().strip()
+        if not text:
+            self.filter_status_label.setText("필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: 기본값과 동일")
+            return
+        try:
+            review.parse_filters(text)
+        except ValueError:
+            self.filter_status_label.setText(f"필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: {text} [형식 오류]")
+            return
+        self.filter_status_label.setText(f"필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: {text}")
 
     @staticmethod
     def _browse_button(handler) -> QPushButton:
@@ -770,6 +821,17 @@ class ReviewTab(QWidget):
 
         self.confirm_button.setText("고래 확정 취소 (Space)" if status_text.startswith("CONFIRMED") else "고래 확정 (Space)")
         self.negative_button.setText("고래 아님 취소 (X)" if "NEGATIVE" in status else "고래 아님 (X)")
+
+    def _on_export_clicked(self) -> None:
+        if not self._output_root():
+            self.status_label.setText("[오류] 검수 출력 폴더를 지정하세요.")
+            return
+        try:
+            path = review.export_confirmed_object_db(self._output_root())
+        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
+            self.status_label.setText(f"[오류] {exc}")
+            return
+        self.status_label.setText(f"통합 JSON 저장됨: {path}")
 
 
 _COMPARE_STATUS_COLORS = {
