@@ -1,0 +1,41 @@
+name: Build and release Windows executable
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build executable
+        run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" main.py
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build (${{ github.sha }})"
+          body: |
+            자동 빌드됨. 커밋: ${{ github.sha }}
+            항상 이 링크가 최신 버전을 가리킵니다:
+            https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.exe
+          files: dist/TrainingDataExtractor.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

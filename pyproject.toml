@@ -1,0 +1,20 @@
+[project]
+name = "tde-pyside6"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "imagecodecs>=2026.3.6",
+    "opencv-python>=5.0.0.93",
+    "pillow>=12.3.0",
+    "pyside6>=6.11.2",
+    "pyyaml>=6.0.3",
+    "tifffile>=2026.3.3",
+    "ultralytics>=8.4.138",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.2",
+]
