@@ -32,7 +32,7 @@ jobs:
           Add-Content -Path appversion.py -Value "BUILD_VERSION = `"$version`""
 
       - name: Build executable
-        run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" main.py
+        run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" --collect-all ultralytics --hidden-import yaml main.py
 
       - name: Write version manifest
         shell: pwsh
