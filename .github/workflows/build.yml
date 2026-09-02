@@ -1,4 +1,4 @@
-name: Build and release Windows executable
+name: Build and release Windows portable app
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync
 
       - name: Stamp build version
         shell: pwsh
@@ -31,8 +31,17 @@ jobs:
           Set-Content -Path appversion.py -Value "COMMIT_SHA = `"${{ github.sha }}`""
           Add-Content -Path appversion.py -Value "BUILD_VERSION = `"$version`""
 
-      - name: Build executable
-        run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" --collect-all ultralytics --hidden-import yaml main.py
+      - name: Assemble portable app folder
+        shell: pwsh
+        run: |
+          $appDir = "dist\TrainingDataExtractor"
+          New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+          Copy-Item .venv "$appDir\.venv" -Recurse
+          Get-ChildItem -Filter *.py | Where-Object { $_.Name -notlike "test_*" } | Copy-Item -Destination $appDir
+          Copy-Item trainer "$appDir\trainer" -Recurse
+          $runBat = "@echo off`r`nstart `"`" `"%~dp0.venv\Scripts\pythonw.exe`" `"%~dp0main.py`""
+          Set-Content -Path "$appDir\Run.bat" -Value $runBat -Encoding ASCII
+          Compress-Archive -Path $appDir -DestinationPath dist\TrainingDataExtractor.zip
 
       - name: Write version manifest
         shell: pwsh
@@ -47,10 +56,14 @@ jobs:
           name: "${{ env.BUILD_VERSION }} (${{ github.sha }})"
           body: |
             자동 빌드됨. 버전: ${{ env.BUILD_VERSION }} / 커밋: ${{ github.sha }}
+            받은 뒤 압축을 풀고 TrainingDataExtractor 폴더 안의 Run.bat을 실행하세요.
+            GPU(cu126 torch)는 처음 GPU 옵션으로 추론/학습을 돌릴 때 그 PC에서 한 번만
+            자동으로 받습니다(설치 후 앱 재시작 필요) - exe에 CUDA를 통째로 넣지 않아
+            2GB 릴리스 제한을 피함.
             항상 이 링크가 최신 버전을 가리킵니다:
-            https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.exe
+            https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.zip
           files: |
-            dist/TrainingDataExtractor.exe
+            dist/TrainingDataExtractor.zip
             dist/version.json
           make_latest: true
         env:

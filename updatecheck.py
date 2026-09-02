@@ -15,7 +15,7 @@ import appversion
 
 REPO = "Kimbb375/yolo_train"
 VERSION_URL = f"https://github.com/{REPO}/releases/latest/download/version.json"
-DOWNLOAD_URL = f"https://github.com/{REPO}/releases/latest/download/TrainingDataExtractor.exe"
+DOWNLOAD_URL = f"https://github.com/{REPO}/releases/latest/download/TrainingDataExtractor.zip"
 
 
 def check_for_update(timeout: float = 5.0) -> Optional[str]:
@@ -33,5 +33,6 @@ def check_for_update(timeout: float = 5.0) -> Optional[str]:
 
     if latest_sha and latest_sha != appversion.COMMIT_SHA:
         label = f"({latest_version}) " if latest_version else ""
-        return f'새 버전 {label}이 있습니다. <a href="{DOWNLOAD_URL}">여기서 다시 받으세요</a>.'
+        return (f'새 버전 {label}이 있습니다. <a href="{DOWNLOAD_URL}">여기서 다시 받으세요</a> '
+                f'(zip 압축 풀고 안의 Run.bat 실행).')
     return None
