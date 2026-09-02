@@ -48,7 +48,9 @@ def _already_attempted_this_version() -> bool:
             data = json.load(fh)
     except Exception:  # noqa: BLE001 - 마커 파일 손상 시 재시도
         return False
-    return data.get("torchVersion") == TORCH_VERSION
+    # installed=False(pip 실패 등)면 재시도 허용 - 성공적으로 설치까지 끝났는데 이 PC에
+    # CUDA가 없는 경우만 재시도 안 함(매번 몇 분씩 재다운로드하는 걸 막기 위함).
+    return data.get("torchVersion") == TORCH_VERSION and data.get("installed") is True
 
 
 def ensure_cuda_torch(log=print) -> bool:
@@ -69,7 +71,7 @@ def ensure_cuda_torch(log=print) -> bool:
     ok = False
     try:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pip", "install",
+            [sys.executable, "-m", "pip", "install", "--break-system-packages",
              f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}",
              "--index-url", INDEX_URL],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

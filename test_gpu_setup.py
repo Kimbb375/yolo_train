@@ -68,7 +68,13 @@ def check_install_flow_and_retry_guard() -> None:
 
     import subprocess
     real_popen = subprocess.Popen
-    subprocess.Popen = lambda *a, **k: _FakeProcess()
+    captured_args: list = []
+
+    def _fake_popen(args, **k):
+        captured_args.append(args)
+        return _FakeProcess()
+
+    subprocess.Popen = _fake_popen
 
     with tempfile.TemporaryDirectory() as tmp:
         # 배포판 레이아웃: <배포 폴더>/python/pythonw.exe (venv Scripts/ 아님 - standalone CPython 통째 복사)
@@ -84,6 +90,9 @@ def check_install_flow_and_retry_guard() -> None:
                 marker = json.load(fh)
             assert marker == {"torchVersion": gpu_setup.TORCH_VERSION, "installed": True}
             assert any("설치를 시작합니다" in line for line in logs)
+            # externally-managed(PEP 668) standalone python이라 이 플래그 없으면 pip install이
+            # "error: externally-managed-environment"로 실패함 - 실제로 한 번 이걸 빼먹어서 배포에서 터짐.
+            assert "--break-system-packages" in captured_args[0]
             assert any("재시작해야" in line for line in logs)
 
             # 2) 재시도: 여전히 CUDA 없음(가짜 torch 그대로) -> 마커 있으니 재설치 없이 바로 False
@@ -106,8 +115,55 @@ def check_install_flow_and_retry_guard() -> None:
     print("OK: 첫 설치 시도 -> 마커 기록 -> 재시도 시 중복 설치 없이 스킵.")
 
 
+def check_failed_install_allows_retry() -> None:
+    # installed=False(pip 실패 등)로 남은 마커는 재시도를 막으면 안 됨 - 실제로
+    # --break-system-packages 빠뜨린 버그를 고친 뒤에도 옛 마커 때문에 계속 재시도
+    # 안 되는 걸 막기 위한 회귀 테스트.
+    previous_sha = appversion.COMMIT_SHA
+    previous_executable = sys.executable
+    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
+    sys.modules["torch"] = fake_torch
+    appversion.COMMIT_SHA = "deadbeef"
+
+    class _FakeFailingProcess:
+        stdout = iter(["error: externally-managed-environment\n"])
+
+        def wait(self) -> int:
+            return 1
+
+    import subprocess
+    real_popen = subprocess.Popen
+    call_count = {"n": 0}
+
+    def _fake_popen(args, **k):
+        call_count["n"] += 1
+        return _FakeFailingProcess()
+
+    subprocess.Popen = _fake_popen
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "python"), exist_ok=True)
+        sys.executable = os.path.join(tmp, "python", "pythonw.exe")
+        try:
+            result1 = gpu_setup.ensure_cuda_torch(log=lambda *_: None)
+            assert result1 is False
+            assert call_count["n"] == 1
+
+            result2 = gpu_setup.ensure_cuda_torch(log=lambda *_: None)
+            assert result2 is False
+            assert call_count["n"] == 2, "실패한 시도는 마커가 있어도 재시도 가능해야 함"
+        finally:
+            sys.executable = previous_executable
+            subprocess.Popen = real_popen
+            appversion.COMMIT_SHA = previous_sha
+            del sys.modules["torch"]
+
+    print("OK: 설치 실패(installed=False) 마커는 재시도를 막지 않음.")
+
+
 if __name__ == "__main__":
     check_wants_gpu()
     check_dev_mode_skips()
     check_already_cuda_available()
     check_install_flow_and_retry_guard()
+    check_failed_install_allows_retry()
