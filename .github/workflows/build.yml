@@ -25,14 +25,16 @@ jobs:
 
       - name: Stamp build version
         shell: pwsh
-        run: Set-Content -Path appversion.py -Value 'COMMIT_SHA = "${{ github.sha }}"'
+        run: |
+          Set-Content -Path appversion.py -Value 'COMMIT_SHA = "${{ github.sha }}"'
 
       - name: Build executable
         run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" main.py
 
       - name: Write version manifest
         shell: pwsh
-        run: Set-Content -Path dist\version.json -Value '{"sha": "${{ github.sha }}"}'
+        run: |
+          Set-Content -Path dist\version.json -Value '{"sha": "${{ github.sha }}"}'
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
