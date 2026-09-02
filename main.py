@@ -18,9 +18,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QGroupBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -494,8 +497,18 @@ class InferenceTab(QWidget):
         self.options_input = QLineEdit(
             "tile_mode=memory, resume=1, tile=640, overlap=0.2, conf=0.1, iou=0.6, imgsz=640, batch=auto, "
             "device=0, max_det=300, merge_iou=0.5, candidate_crop=640, candidate_context=120, candidate_view=tile")
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
+
+        # C# InferenceTilingRunner 로그를 3개 창으로 분리해서 보여주던 걸 그대로 포팅:
+        # Summary(요약/에러/완료) / Load-Prefetch(tif 로딩) / Infer-Save(타일 추론+저장 진행).
+        self._line_buffer = ""
+        self.summary_log = QPlainTextEdit()
+        self.summary_log.setReadOnly(True)
+        self.load_log = QPlainTextEdit()
+        self.load_log.setReadOnly(True)
+        self.detail_log = QPlainTextEdit()
+        self.detail_log.setReadOnly(True)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFormat("현재 TIF 타일 진행: %v / %m")
 
         source_buttons = QHBoxLayout()
         source_buttons.addWidget(self._browse_button(self._pick_source, "폴더 선택..."))
@@ -527,11 +540,28 @@ class InferenceTab(QWidget):
         build_row.addWidget(self.start_button)
         build_row.addStretch(1)
 
+        detail_split = QSplitter(Qt.Orientation.Horizontal)
+        detail_split.addWidget(self._log_group("Load / Prefetch", self.load_log))
+        detail_split.addWidget(self._log_group("Infer / Save", self.detail_log))
+
+        log_split = QSplitter(Qt.Orientation.Vertical)
+        log_split.addWidget(self._log_group("Summary", self.summary_log))
+        log_split.addWidget(detail_split)
+        log_split.setSizes([190, 300])
+
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(options_row)
         layout.addLayout(build_row)
-        layout.addWidget(self.log, stretch=1)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(log_split, stretch=1)
+
+    @staticmethod
+    def _log_group(title: str, content: QPlainTextEdit) -> QGroupBox:
+        group = QGroupBox(title)
+        box_layout = QVBoxLayout(group)
+        box_layout.addWidget(content)
+        return group
 
     @staticmethod
     def _browse_button(handler, label: str = "찾기...") -> QPushButton:
@@ -580,29 +610,53 @@ class InferenceTab(QWidget):
         model_path = self.model_input.text().strip()
         output_root = self.output_input.text().strip()
         if not source or not model_path or not output_root:
-            self.log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
+            self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
             return
 
-        self.log.setPlainText("추론 시작...\n")
+        for log in (self.summary_log, self.load_log, self.detail_log):
+            log.clear()
+        self.progress_bar.setValue(0)
+        self._line_buffer = ""
+        self.summary_log.setPlainText("추론 시작...\n")
         self.start_button.setEnabled(False)
         self._worker = BackgroundCallWorker(
             inference.run, source, output_root, model_path,
             self.name_input.text().strip() or None, self.options_input.text())
-        self._worker.output.connect(self._append_log)
+        self._worker.output.connect(self._on_worker_output)
         self._worker.finished_ok.connect(self._on_finished_ok)
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
 
-    def _append_log(self, text: str) -> None:
-        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
-        self.log.insertPlainText(text)
+    def _on_worker_output(self, text: str) -> None:
+        # print()는 라인 조각 단위로 여러 번 emit되므로 줄바꿈 기준으로 모아서 줄 단위로 분류함.
+        self._line_buffer += text
+        while "\n" in self._line_buffer:
+            line, self._line_buffer = self._line_buffer.split("\n", 1)
+            self._route_line(line)
+
+    def _route_line(self, line: str) -> None:
+        self._log_target_for(line).appendPlainText(line)
+        match = re.search(r"processed (\d+)/(\d+) tiles", line)
+        if match:
+            expected = int(match.group(2))
+            if expected > 0:
+                self.progress_bar.setMaximum(expected)
+                self.progress_bar.setValue(min(int(match.group(1)), expected))
+
+    def _log_target_for(self, line: str) -> QPlainTextEdit:
+        # C# InferenceTilingRunner의 IsTifLoadLog/IsTifDetailLog 분류 규칙 그대로 포팅.
+        if line.startswith("Prefetch loading ") or (line.startswith("Processing ") and " loaded_in=" in line):
+            return self.load_log
+        if ": processed " in line or line.startswith("Saved intermediate candidates:"):
+            return self.detail_log
+        return self.summary_log
 
     def _on_finished_ok(self, result) -> None:
-        self._append_log("\n" + result.to_display_text() + "\n")
+        self.summary_log.appendPlainText("\n" + result.to_display_text())
         self.start_button.setEnabled(True)
 
     def _on_finished_error(self, message: str) -> None:
-        self._append_log(f"\n[오류] {message}\n")
+        self.summary_log.appendPlainText(f"\n[오류] {message}")
         self.start_button.setEnabled(True)
 
 
