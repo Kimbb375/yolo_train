@@ -37,6 +37,7 @@ import sourceimage
 import sourceverify
 import trainingdataset
 import training
+import appversion
 import updatecheck
 import yolodataset
 
@@ -1350,7 +1351,8 @@ class UpdateBanner(QLabel):
 def main() -> int:
     app = QApplication(sys.argv)
     window = QMainWindow()
-    window.setWindowTitle("Training Data Extractor (PySide6 pilot)")
+    version_label = appversion.BUILD_VERSION or "dev"
+    window.setWindowTitle(f"Training Data Extractor (PySide6 pilot) - {version_label}")
 
     tabs = QTabWidget()
     tabs.addTab(LabelDbTab(), "1. 라벨 DB")

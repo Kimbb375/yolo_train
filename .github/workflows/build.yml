@@ -26,7 +26,10 @@ jobs:
       - name: Stamp build version
         shell: pwsh
         run: |
-          Set-Content -Path appversion.py -Value 'COMMIT_SHA = "${{ github.sha }}"'
+          $version = "$((Get-Date).ToUniversalTime().ToString('yyyy.MM.dd')).${{ github.run_number }}"
+          echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          Set-Content -Path appversion.py -Value "COMMIT_SHA = `"${{ github.sha }}`""
+          Add-Content -Path appversion.py -Value "BUILD_VERSION = `"$version`""
 
       - name: Build executable
         run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" main.py
@@ -34,15 +37,16 @@ jobs:
       - name: Write version manifest
         shell: pwsh
         run: |
-          Set-Content -Path dist\version.json -Value '{"sha": "${{ github.sha }}"}'
+          $manifest = @{ sha = "${{ github.sha }}"; version = "${{ env.BUILD_VERSION }}" } | ConvertTo-Json -Compress
+          Set-Content -Path dist\version.json -Value $manifest
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "Latest build (${{ github.sha }})"
+          name: "${{ env.BUILD_VERSION }} (${{ github.sha }})"
           body: |
-            자동 빌드됨. 커밋: ${{ github.sha }}
+            자동 빌드됨. 버전: ${{ env.BUILD_VERSION }} / 커밋: ${{ github.sha }}
             항상 이 링크가 최신 버전을 가리킵니다:
             https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.exe
           files: |

@@ -27,9 +27,11 @@ def check_for_update(timeout: float = 5.0) -> Optional[str]:
         with urllib.request.urlopen(VERSION_URL, timeout=timeout) as response:
             data = json.load(response)
         latest_sha = data.get("sha", "")
+        latest_version = data.get("version", "")
     except Exception:  # noqa: BLE001 - 네트워크/파싱 실패는 조용히 무시
         return None
 
     if latest_sha and latest_sha != appversion.COMMIT_SHA:
-        return f'새 버전이 있습니다. <a href="{DOWNLOAD_URL}">여기서 다시 받으세요</a>.'
+        label = f"({latest_version}) " if latest_version else ""
+        return f'새 버전 {label}이 있습니다. <a href="{DOWNLOAD_URL}">여기서 다시 받으세요</a>.'
     return None
