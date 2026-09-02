@@ -23,8 +23,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Stamp build version
+        shell: pwsh
+        run: Set-Content -Path appversion.py -Value 'COMMIT_SHA = "${{ github.sha }}"'
+
       - name: Build executable
         run: uv run pyinstaller --name TrainingDataExtractor --onefile --windowed --add-data "trainer;trainer" main.py
+
+      - name: Write version manifest
+        shell: pwsh
+        run: Set-Content -Path dist\version.json -Value '{"sha": "${{ github.sha }}"}'
 
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
@@ -35,7 +43,9 @@ jobs:
             자동 빌드됨. 커밋: ${{ github.sha }}
             항상 이 링크가 최신 버전을 가리킵니다:
             https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.exe
-          files: dist/TrainingDataExtractor.exe
+          files: |
+            dist/TrainingDataExtractor.exe
+            dist/version.json
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

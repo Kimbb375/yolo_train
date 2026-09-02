@@ -37,6 +37,7 @@ import sourceimage
 import sourceverify
 import trainingdataset
 import training
+import updatecheck
 import yolodataset
 
 AUGMENTATION_PRESETS = {
@@ -1332,6 +1333,20 @@ class SourceVerifyTab(QWidget):
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
 
+class UpdateBanner(QLabel):
+    """업데이트 알림 배너 — 새 버전 있을 때만 나타남(없으면 높이 0, 자리 안 차지)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setOpenExternalLinks(True)
+        self.setStyleSheet("background-color: #fff3cd; color: #664d03; padding: 6px;")
+        self.hide()
+
+    def show_message(self, html: str) -> None:
+        self.setText(html)
+        self.show()
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     window = QMainWindow()
@@ -1346,9 +1361,21 @@ def main() -> int:
     tabs.addTab(InferenceTab(), "6. 원본 추론")
     tabs.addTab(ReviewTab(), "7. 후보 검수")
     tabs.addTab(CompareTab(), "8. 매칭/선별")
-    window.setCentralWidget(tabs)
+
+    banner = UpdateBanner()
+    central = QWidget()
+    central_layout = QVBoxLayout(central)
+    central_layout.setContentsMargins(0, 0, 0, 0)
+    central_layout.addWidget(banner)
+    central_layout.addWidget(tabs, stretch=1)
+    window.setCentralWidget(central)
     window.resize(820, 560)
     window.show()
+
+    update_worker = BackgroundCallWorker(updatecheck.check_for_update)
+    update_worker.finished_ok.connect(lambda message: banner.show_message(message) if message else None)
+    window._update_worker = update_worker  # QThread가 GC되지 않게 참조 유지
+    update_worker.start()
 
     return app.exec()
 
