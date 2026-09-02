@@ -71,13 +71,14 @@ def check_install_flow_and_retry_guard() -> None:
     subprocess.Popen = lambda *a, **k: _FakeProcess()
 
     with tempfile.TemporaryDirectory() as tmp:
-        os.makedirs(os.path.join(tmp, ".venv", "Scripts"), exist_ok=True)
-        sys.executable = os.path.join(tmp, ".venv", "Scripts", "pythonw.exe")
+        # 배포판 레이아웃: <배포 폴더>/python/pythonw.exe (venv Scripts/ 아님 - standalone CPython 통째 복사)
+        os.makedirs(os.path.join(tmp, "python"), exist_ok=True)
+        sys.executable = os.path.join(tmp, "python", "pythonw.exe")
         try:
             # 1) 처음 시도: pip install(가짜) 성공 -> 마커 기록, 그래도 이번 실행은 False
             result = gpu_setup.ensure_cuda_torch(log=logs.append)
             assert result is False
-            marker_path = os.path.join(tmp, ".venv", "_gpu_torch_attempted.json")
+            marker_path = os.path.join(tmp, "python", "_gpu_torch_attempted.json")
             assert os.path.isfile(marker_path)
             with open(marker_path, encoding="utf-8") as fh:
                 marker = json.load(fh)

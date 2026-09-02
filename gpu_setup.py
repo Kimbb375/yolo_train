@@ -1,8 +1,9 @@
 """GPU(CUDA) torch 준비: 처음 GPU(device!=cpu)로 추론/학습을 돌릴 때, 이 앱이 실행 중인
-포터블 venv(.venv)에 실제 `pip install`로 cu126 torch/torchvision을 한 번만 설치함.
+포터블 standalone 파이썬(python/ 폴더, uv-managed CPython을 그대로 복사한 것 - venv 아님)에
+실제 `pip install`로 cu126 torch/torchvision을 한 번만 설치함.
 
 exe 하나에 CUDA torch를 통째로 번들하면 용량이 1.5~2GB+ 로 커져서 GitHub Release 2GB
-제한에 걸릴 수 있음 - 그래서 배포판은 CPU torch만 들고 있는 가벼운 포터블 venv 폴더로
+제한에 걸릴 수 있음 - 그래서 배포판은 CPU torch만 들고 있는 가벼운 포터블 파이썬 폴더로
 두고, GPU가 필요해지는 시점에만 그 PC에서 실제로 받게 함(C# 원본의 TrainingDataExtractor/
 python/ 폴더도 같은 방식 - cu121 torch를 미리 설치해둔 포터블 파이썬이었음).
 
@@ -25,13 +26,9 @@ TORCHVISION_VERSION = "0.28.0+cu126"
 INDEX_URL = "https://download.pytorch.org/whl/cu126"
 
 
-def _venv_root() -> str:
-    # sys.executable = <venv>/Scripts/python(w).exe
-    return os.path.dirname(os.path.dirname(sys.executable))
-
-
 def _marker_path() -> str:
-    return os.path.join(_venv_root(), "_gpu_torch_attempted.json")
+    # sys.executable = <배포 폴더>/python/python(w).exe (포터블 standalone CPython, venv 아님)
+    return os.path.join(os.path.dirname(sys.executable), "_gpu_torch_attempted.json")
 
 
 def _cuda_available() -> bool:
