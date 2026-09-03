@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 import json
 
+import batchbench
 import centertile
 import compare
 import gpu_setup
@@ -587,12 +588,19 @@ class InferenceTab(QWidget):
         super().__init__()
         self._worker: BackgroundCallWorker | None = None
         self._gpu_worker: BackgroundCallWorker | None = None
+        self._bench_worker: BackgroundCallWorker | None = None
         self._selected_files: list[str] = []
 
         self.gpu_status_label = QLabel()
         self.gpu_install_button = QPushButton("GPU torch 설치")
         self.gpu_install_button.clicked.connect(self._on_gpu_install_clicked)
         self._refresh_gpu_status()
+
+        self.optimize_button = QPushButton("최적 배치 검색")
+        self.optimize_button.setToolTip(
+            "이 GPU/모델/타일 크기로 실제 벤치마크를 돌려서 안전한 최대 batch 값을 찾고 "
+            "옵션에 자동 반영합니다 (수십 초 소요).")
+        self.optimize_button.clicked.connect(self._on_optimize_clicked)
 
         self.source_input = QLineEdit()
         self.source_input.textEdited.connect(self._on_source_edited_by_user)
@@ -657,6 +665,7 @@ class InferenceTab(QWidget):
         gpu_row = QHBoxLayout()
         gpu_row.addWidget(self.gpu_status_label)
         gpu_row.addWidget(self.gpu_install_button)
+        gpu_row.addWidget(self.optimize_button)
         gpu_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -738,6 +747,53 @@ class InferenceTab(QWidget):
     def _on_gpu_install_finished(self, _result=None) -> None:
         self.gpu_install_button.setEnabled(True)
         self._refresh_gpu_status()
+
+    @staticmethod
+    def _get_option(options_text: str, key: str, default: str) -> str:
+        for part in options_text.split(","):
+            part = part.strip()
+            if "=" in part and part.split("=", 1)[0].strip() == key:
+                return part.split("=", 1)[1].strip()
+        return default
+
+    @staticmethod
+    def _set_option(options_text: str, key: str, value) -> str:
+        parts = [p.strip() for p in options_text.split(",") if p.strip()]
+        for i, part in enumerate(parts):
+            if part.split("=", 1)[0].strip() == key:
+                parts[i] = f"{key}={value}"
+                break
+        else:
+            parts.append(f"{key}={value}")
+        return ", ".join(parts)
+
+    def _on_optimize_clicked(self) -> None:
+        model_path = self.model_input.text().strip()
+        if not model_path:
+            self.summary_log.appendPlainText("\n[오류] 먼저 모델 pt를 지정하세요.")
+            return
+
+        options_text = self.options_input.text()
+        tile = int(float(self._get_option(options_text, "tile", "640")))
+        imgsz = int(float(self._get_option(options_text, "imgsz", "640")))
+        device = self._get_option(options_text, "device", "0")
+
+        self.optimize_button.setEnabled(False)
+        self.summary_log.appendPlainText("\n최적 배치 크기 탐색 중 (실제 GPU/CPU로 벤치마크, 수십 초 소요)...")
+        self._bench_worker = BackgroundCallWorker(batchbench.run, model_path, tile, imgsz, device)
+        self._bench_worker.output.connect(self._on_worker_output)
+        self._bench_worker.finished_ok.connect(self._on_bench_finished)
+        self._bench_worker.finished_error.connect(self._on_bench_error)
+        self._bench_worker.start()
+
+    def _on_bench_finished(self, result: batchbench.BatchBenchResult) -> None:
+        self.optimize_button.setEnabled(True)
+        self.options_input.setText(self._set_option(self.options_input.text(), "batch", result.recommendedBatch))
+        self.summary_log.appendPlainText("\n" + result.to_display_text())
+
+    def _on_bench_error(self, message: str) -> None:
+        self.optimize_button.setEnabled(True)
+        self.summary_log.appendPlainText(f"\n[오류] 배치 벤치마크 실패: {message}")
 
     def _on_start_clicked(self) -> None:
         source = ";".join(self._selected_files) if self._selected_files else self.source_input.text().strip()

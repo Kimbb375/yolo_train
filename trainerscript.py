@@ -20,7 +20,7 @@ from typing import Sequence
 TRAINER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trainer")
 
 # ultralytics(torch)를 실제로 쓰는 스크립트만 GPU 준비를 거침 (check_env/download_model 등은 불필요).
-_GPU_MODULES = {"train", "infer_tiles", "infer_tif_memory"}
+_GPU_MODULES = {"train", "infer_tiles", "infer_tif_memory", "bench_batch"}
 
 
 def _wants_gpu(args: Sequence[str]) -> bool:
