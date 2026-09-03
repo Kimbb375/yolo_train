@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 import json
 
 import compare
+import gpu_setup
 import inference
 import objectdb
 import review
@@ -487,7 +488,13 @@ class InferenceTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._worker: BackgroundCallWorker | None = None
+        self._gpu_worker: BackgroundCallWorker | None = None
         self._selected_files: list[str] = []
+
+        self.gpu_status_label = QLabel()
+        self.gpu_install_button = QPushButton("GPU torch 설치")
+        self.gpu_install_button.clicked.connect(self._on_gpu_install_clicked)
+        self._refresh_gpu_status()
 
         self.source_input = QLineEdit()
         self.source_input.textEdited.connect(self._on_source_edited_by_user)
@@ -549,7 +556,13 @@ class InferenceTab(QWidget):
         log_split.addWidget(detail_split)
         log_split.setSizes([190, 300])
 
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(self.gpu_status_label)
+        gpu_row.addWidget(self.gpu_install_button)
+        gpu_row.addStretch(1)
+
         layout = QVBoxLayout(self)
+        layout.addLayout(gpu_row)
         layout.addLayout(form)
         layout.addLayout(options_row)
         layout.addLayout(build_row)
@@ -604,6 +617,29 @@ class InferenceTab(QWidget):
         path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if path:
             self.output_input.setText(path)
+
+    def _refresh_gpu_status(self) -> None:
+        state = gpu_setup.status()
+        text = {
+            "available": "GPU torch: 설치되어 있음 (사용 가능)",
+            "unavailable": "GPU torch: 설치했지만 이 PC에서 CUDA를 못 찾음 - CPU로 진행됨",
+            "not_installed": "GPU torch: 설치 필요 (device=0 등으로 추론하려면 먼저 설치하세요)",
+        }[state]
+        self.gpu_status_label.setText(text)
+        self.gpu_install_button.setVisible(state != "available")
+
+    def _on_gpu_install_clicked(self) -> None:
+        self.gpu_install_button.setEnabled(False)
+        self.summary_log.appendPlainText("\nGPU torch 설치 시작...")
+        self._gpu_worker = BackgroundCallWorker(gpu_setup.ensure_cuda_torch)
+        self._gpu_worker.output.connect(self._on_worker_output)
+        self._gpu_worker.finished_ok.connect(self._on_gpu_install_finished)
+        self._gpu_worker.finished_error.connect(self._on_gpu_install_finished)
+        self._gpu_worker.start()
+
+    def _on_gpu_install_finished(self, _result=None) -> None:
+        self.gpu_install_button.setEnabled(True)
+        self._refresh_gpu_status()
 
     def _on_start_clicked(self) -> None:
         source = ";".join(self._selected_files) if self._selected_files else self.source_input.text().strip()
@@ -678,6 +714,9 @@ class CandidateImageLabel(QLabel):
 class ReviewTab(QWidget):
     """7. 후보 검수 — candidates.json을 A/D로 넘기며 Space(고래 확정)/X(고래 아님)로 분류."""
 
+    # 의심 후보(재검토 권장) 기준값 - 실제 필터로 자동 적용되진 않고 참고용으로만 표시.
+    DEFAULT_FILTER_HINT = "conf<0.2, width<10, height>100, area<30"
+
     def __init__(self) -> None:
         super().__init__()
         self._candidates: list[review.ReviewCandidate] = []
@@ -686,7 +725,7 @@ class ReviewTab(QWidget):
         self.candidate_json_input = QLineEdit()
         self.output_root_input = QLineEdit()
         self.filter_input = QLineEdit()
-        self.filter_input.setPlaceholderText("예: conf>=0.3, width>=20")
+        self.filter_input.setPlaceholderText(self.DEFAULT_FILTER_HINT)
         self.filter_input.textChanged.connect(self._update_filter_status_label)
         self.filter_status_label = QLabel()
         self.filter_status_label.setStyleSheet("color: #666;")
@@ -754,18 +793,19 @@ class ReviewTab(QWidget):
         self._update_filter_status_label()
 
     def _update_filter_status_label(self) -> None:
-        # conf/area/width/height는 강제되는 기본값이 없음 - 필터 비우면 전체 표시가 기본값.
-        # "지금 몇 이상만 보고 있는지"를 항상 보이게 표기.
+        # DEFAULT_FILTER_HINT는 참고용 의심 후보 기준일 뿐 자동 적용 안 됨 - 필터 비우면
+        # 실제로는 전체 표시가 기본 동작. "지금 몇 이상만 보고 있는지"를 항상 보이게 표기.
+        default_text = f"필터 기준 — 기본값(참고용, 자동 적용 안 됨): {self.DEFAULT_FILTER_HINT}"
         text = self.filter_input.text().strip()
         if not text:
-            self.filter_status_label.setText("필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: 기본값과 동일")
+            self.filter_status_label.setText(f"{default_text} / 현재 설정: 없음 (전체 표시)")
             return
         try:
             review.parse_filters(text)
         except ValueError:
-            self.filter_status_label.setText(f"필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: {text} [형식 오류]")
+            self.filter_status_label.setText(f"{default_text} / 현재 설정: {text} [형식 오류]")
             return
-        self.filter_status_label.setText(f"필터 기준 — 기본값: 없음 (전체 표시) / 현재 설정: {text}")
+        self.filter_status_label.setText(f"{default_text} / 현재 설정: {text}")
 
     @staticmethod
     def _browse_button(handler) -> QPushButton:

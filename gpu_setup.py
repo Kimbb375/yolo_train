@@ -53,6 +53,17 @@ def _already_attempted_this_version() -> bool:
     return data.get("torchVersion") == TORCH_VERSION and data.get("installed") is True
 
 
+def status() -> str:
+    """부수효과 없이 현재 상태만 확인(설치 시도 안 함) - 6번 탭 진입 시 표시용.
+    "available": CUDA 바로 사용 가능. "unavailable": 설치까지 끝났는데 이 PC에 CUDA 없음.
+    "not_installed": 아직 설치 안 함(버튼으로 설치 가능)."""
+    if _cuda_available():
+        return "available"
+    if _already_attempted_this_version():
+        return "unavailable"
+    return "not_installed"
+
+
 def ensure_cuda_torch(log=print) -> bool:
     """CUDA torch를 바로 쓸 수 있으면 True. 없으면 설치를 시도(성공하든 실패하든) 후 항상
     False - 이번 실행에서는 못 쓰고(같은 프로세스 제약) 재시작해야 적용됨."""
