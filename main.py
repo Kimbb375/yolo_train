@@ -66,6 +66,7 @@ class LabelDbTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._worker: BackgroundCallWorker | None = None
 
         self.source_input = QLineEdit()
         self.output_input = QLineEdit()
@@ -82,9 +83,9 @@ class LabelDbTab(QWidget):
         form.addWidget(self._browse_button(self._pick_output), 1, 2)
 
         build_row = QHBoxLayout()
-        build_button = QPushButton("DB 생성")
-        build_button.clicked.connect(self._on_build_clicked)
-        build_row.addWidget(build_button)
+        self.build_button = QPushButton("DB 생성")
+        self.build_button.clicked.connect(self._on_build_clicked)
+        build_row.addWidget(self.build_button)
         build_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -115,14 +116,28 @@ class LabelDbTab(QWidget):
             self.log.setPlainText("[오류] YOLO 라벨 루트 폴더를 지정하세요.")
             return
 
-        try:
-            result = objectdb.build(source, output)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.log.setPlainText(f"[오류] {exc}")
-            return
+        # 라벨 폴더가 크면(타일 이미지 수천 장) 메인 스레드에서 그대로 돌릴 경우 창이 멈춘
+        # 것처럼 보임 - 백그라운드로 뺌.
+        self.log.setPlainText("DB 생성 중...\n")
+        self.build_button.setEnabled(False)
+        self._worker = BackgroundCallWorker(objectdb.build, source, output)
+        self._worker.output.connect(self._append_log)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
 
-        self.log.setPlainText(result.to_display_text())
+    def _append_log(self, text: str) -> None:
+        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        self.log.insertPlainText(text)
+
+    def _on_finished_ok(self, result) -> None:
+        self.log.appendPlainText("\n" + result.to_display_text())
         self.output_input.setText(result.outputPath)
+        self.build_button.setEnabled(True)
+
+    def _on_finished_error(self, message: str) -> None:
+        self.log.appendPlainText(f"\n[오류] {message}")
+        self.build_button.setEnabled(True)
 
 
 class TrainingTileTab(QWidget):
@@ -130,6 +145,7 @@ class TrainingTileTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._worker: BackgroundCallWorker | None = None
 
         self.object_db_input = QLineEdit()
         self.source_root_input = QLineEdit()
@@ -160,9 +176,9 @@ class TrainingTileTab(QWidget):
         size_row.addStretch(1)
 
         build_row = QHBoxLayout()
-        build_button = QPushButton("학습 타일 생성")
-        build_button.clicked.connect(self._on_build_clicked)
-        build_row.addWidget(build_button)
+        self.build_button = QPushButton("학습 타일 생성")
+        self.build_button.clicked.connect(self._on_build_clicked)
+        build_row.addWidget(self.build_button)
         build_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -203,13 +219,28 @@ class TrainingTileTab(QWidget):
             self.log.setPlainText("[오류] object JSON, 원본 TIF 루트, 출력 폴더를 모두 지정하세요.")
             return
 
-        try:
-            result = trainingdataset.build(object_db_path, source_root, output_root, sizes or None)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.log.setPlainText(f"[오류] {exc}")
-            return
+        # object 개수/원본 TIF 크기(특히 네트워크 공유 폴더)에 따라 수 분 걸릴 수 있어서
+        # 메인 스레드에서 그냥 돌리면 그동안 창이 "응답 없음"처럼 멈춰 보임 - 백그라운드로 뺌.
+        self.log.setPlainText("학습 타일 생성 중...\n")
+        self.build_button.setEnabled(False)
+        self._worker = BackgroundCallWorker(trainingdataset.build, object_db_path, source_root,
+                                             output_root, sizes or None)
+        self._worker.output.connect(self._append_log)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
 
-        self.log.setPlainText(result.to_display_text())
+    def _append_log(self, text: str) -> None:
+        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        self.log.insertPlainText(text)
+
+    def _on_finished_ok(self, result) -> None:
+        self.log.appendPlainText("\n" + result.to_display_text())
+        self.build_button.setEnabled(True)
+
+    def _on_finished_error(self, message: str) -> None:
+        self.log.appendPlainText(f"\n[오류] {message}")
+        self.build_button.setEnabled(True)
 
 
 class CenterTileTab(QWidget):
@@ -218,6 +249,7 @@ class CenterTileTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._worker: BackgroundCallWorker | None = None
 
         self.object_db_input = QLineEdit()
         self.source_root_input = QLineEdit()
@@ -248,9 +280,9 @@ class CenterTileTab(QWidget):
         size_row.addStretch(1)
 
         build_row = QHBoxLayout()
-        build_button = QPushButton("중앙 크롭 생성")
-        build_button.clicked.connect(self._on_build_clicked)
-        build_row.addWidget(build_button)
+        self.build_button = QPushButton("중앙 크롭 생성")
+        self.build_button.clicked.connect(self._on_build_clicked)
+        build_row.addWidget(self.build_button)
         build_row.addStretch(1)
 
         guide = QLabel(
@@ -299,13 +331,26 @@ class CenterTileTab(QWidget):
             self.log.setPlainText("[오류] object JSON, 원본 TIF 루트, 출력 폴더를 모두 지정하세요.")
             return
 
-        try:
-            result = centertile.build(object_db_path, source_root, output_root, sizes or None)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.log.setPlainText(f"[오류] {exc}")
-            return
+        self.log.setPlainText("중앙 크롭 생성 중...\n")
+        self.build_button.setEnabled(False)
+        self._worker = BackgroundCallWorker(centertile.build, object_db_path, source_root,
+                                             output_root, sizes or None)
+        self._worker.output.connect(self._append_log)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
 
-        self.log.setPlainText(result.to_display_text())
+    def _append_log(self, text: str) -> None:
+        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        self.log.insertPlainText(text)
+
+    def _on_finished_ok(self, result) -> None:
+        self.log.appendPlainText("\n" + result.to_display_text())
+        self.build_button.setEnabled(True)
+
+    def _on_finished_error(self, message: str) -> None:
+        self.log.appendPlainText(f"\n[오류] {message}")
+        self.build_button.setEnabled(True)
 
 
 class YoloOrganizeTab(QWidget):
@@ -313,6 +358,7 @@ class YoloOrganizeTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._worker: BackgroundCallWorker | None = None
 
         self.source_root_input = QLineEdit()
         self.target_root_input = QLineEdit()
@@ -354,9 +400,9 @@ class YoloOrganizeTab(QWidget):
         ratio_row.addStretch(1)
 
         build_row = QHBoxLayout()
-        build_button = QPushButton("YOLO 정렬 실행")
-        build_button.clicked.connect(self._on_build_clicked)
-        build_row.addWidget(build_button)
+        self.build_button = QPushButton("YOLO 정렬 실행")
+        self.build_button.clicked.connect(self._on_build_clicked)
+        build_row.addWidget(self.build_button)
         build_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -395,17 +441,28 @@ class YoloOrganizeTab(QWidget):
             self.log.setPlainText("[오류] 3번 출력 루트와 YOLO 출력 루트를 모두 지정하세요.")
             return
 
-        try:
-            result = yolodataset.organize(
-                source_root, target_root, self.image_size_input.value(),
-                self.train_ratio_input.value(), self.val_ratio_input.value(),
-                self.test_ratio_input.value(), self.predict_ratio_input.value(),
-                self.seed_input.value())
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.log.setPlainText(f"[오류] {exc}")
-            return
+        self.log.setPlainText("YOLO 정렬 실행 중...\n")
+        self.build_button.setEnabled(False)
+        self._worker = BackgroundCallWorker(
+            yolodataset.organize, source_root, target_root, self.image_size_input.value(),
+            self.train_ratio_input.value(), self.val_ratio_input.value(),
+            self.test_ratio_input.value(), self.predict_ratio_input.value(), self.seed_input.value())
+        self._worker.output.connect(self._append_log)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
 
-        self.log.setPlainText(result.to_display_text())
+    def _append_log(self, text: str) -> None:
+        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+        self.log.insertPlainText(text)
+
+    def _on_finished_ok(self, result) -> None:
+        self.log.appendPlainText("\n" + result.to_display_text())
+        self.build_button.setEnabled(True)
+
+    def _on_finished_error(self, message: str) -> None:
+        self.log.appendPlainText(f"\n[오류] {message}")
+        self.build_button.setEnabled(True)
 
 
 class _StreamToSignal(io.TextIOBase):
@@ -1096,6 +1153,9 @@ class CompareTab(QWidget):
         super().__init__()
         self._left_document: Optional[dict] = None
         self._right_document: Optional[dict] = None
+        self._load_worker: BackgroundCallWorker | None = None
+        self._export_worker: BackgroundCallWorker | None = None
+        self._pending_export_count = 0
 
         self.left_input = QLineEdit()
         self.right_input = QLineEdit()
@@ -1124,9 +1184,9 @@ class CompareTab(QWidget):
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("IoU 기준"))
         top_row.addWidget(self.iou_input)
-        load_button = QPushButton("뷰어 로드")
-        load_button.clicked.connect(self._on_load_clicked)
-        top_row.addWidget(load_button)
+        self.load_button = QPushButton("뷰어 로드")
+        self.load_button.clicked.connect(self._on_load_clicked)
+        top_row.addWidget(self.load_button)
         top_row.addStretch(1)
 
         select_row = QHBoxLayout()
@@ -1137,9 +1197,9 @@ class CompareTab(QWidget):
             button = QPushButton(label)
             button.clicked.connect(handler)
             select_row.addWidget(button)
-        export_button = QPushButton("체크 내보내기")
-        export_button.clicked.connect(self._on_export_clicked)
-        select_row.addWidget(export_button)
+        self.export_button = QPushButton("체크 내보내기")
+        self.export_button.clicked.connect(self._on_export_clicked)
+        select_row.addWidget(self.export_button)
         select_row.addStretch(1)
 
         self.left_table = self._make_table()
@@ -1202,6 +1262,18 @@ class CompareTab(QWidget):
                 table.setItem(row_index, column_offset, item)
         table.resizeColumnsToContents()
 
+    @staticmethod
+    def _load_compare_data(left_path: str, right_path: str, threshold: float) -> dict:
+        left_document = compare.load_compare_document(left_path)
+        right_document = compare.load_compare_document(right_path)
+        left_objects = left_document["objects"]
+        right_objects = right_document["objects"]
+        return {
+            "left_document": left_document, "right_document": right_document,
+            "left_rows": compare.build_compare_rows(left_objects, right_objects, True, threshold),
+            "right_rows": compare.build_compare_rows(right_objects, left_objects, False, threshold),
+        }
+
     def _on_load_clicked(self) -> None:
         left_path = self.left_input.text().strip()
         right_path = self.right_input.text().strip()
@@ -1209,26 +1281,36 @@ class CompareTab(QWidget):
             self.status_label.setText("[오류] 왼쪽/오른쪽 데이터 경로를 모두 지정하세요.")
             return
 
-        try:
-            self._left_document = compare.load_compare_document(left_path)
-            self._right_document = compare.load_compare_document(right_path)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.status_label.setText(f"[오류] {exc}")
-            return
+        # object 개수가 많으면 IoU 매칭이 O(n*m)이라 메인 스레드에서 그대로 돌리면 창이
+        # 멈춘 것처럼 보임 - 백그라운드로 뺌.
+        self.status_label.setText("불러오는 중...")
+        self.load_button.setEnabled(False)
+        self._load_worker = BackgroundCallWorker(
+            self._load_compare_data, left_path, right_path, self.iou_input.value())
+        self._load_worker.finished_ok.connect(self._on_load_finished)
+        self._load_worker.finished_error.connect(self._on_load_error)
+        self._load_worker.start()
+
+    def _on_load_finished(self, data: dict) -> None:
+        self.load_button.setEnabled(True)
+        self._left_document = data["left_document"]
+        self._right_document = data["right_document"]
+        self._populate_table(self.left_table, data["left_rows"])
+        self._populate_table(self.right_table, data["right_rows"])
 
         threshold = self.iou_input.value()
         left_objects = self._left_document["objects"]
         right_objects = self._right_document["objects"]
-        left_rows = compare.build_compare_rows(left_objects, right_objects, True, threshold)
-        right_rows = compare.build_compare_rows(right_objects, left_objects, False, threshold)
-        self._populate_table(self.left_table, left_rows)
-        self._populate_table(self.right_table, right_rows)
-
-        matched = sum(1 for row in left_rows if row["status"] == "MATCH")
+        matched = sum(1 for row in data["left_rows"] if row["status"] == "MATCH")
         self.status_label.setText(
             f"Base objects : {len(left_objects)}  |  Review/new : {len(right_objects)}  |  "
             f"Matched : {matched}  |  Missed : {len(left_objects) - matched}  |  "
-            f"New : {sum(1 for row in right_rows if row['status'] == 'NEW')}  |  IoU threshold : {threshold:.2f}")
+            f"New : {sum(1 for row in data['right_rows'] if row['status'] == 'NEW')}  |  "
+            f"IoU threshold : {threshold:.2f}")
+
+    def _on_load_error(self, message: str) -> None:
+        self.load_button.setEnabled(True)
+        self.status_label.setText(f"[오류] {message}")
 
     def _set_checks(self, predicate) -> None:
         for row_index in range(self.right_table.rowCount()):
@@ -1261,12 +1343,25 @@ class CompareTab(QWidget):
         output_json_path = output_text if output_text.lower().endswith((".json", ".jsonl")) \
             else os.path.join(output_text, "object_db_selected.json")
 
-        try:
-            exported = compare.export_selected(self._right_document, selected, output_json_path)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.status_label.setText(f"[오류] {exc}")
-            return
-        self.status_label.setText(f"[OK] checked review rows exported\nSelected objects: {len(selected)}\nOutput JSON: {exported}")
+        # 체크한 개체가 많으면 타일 이미지/라벨 파일 복사가 오래 걸릴 수 있어서 백그라운드로 뺌.
+        self.status_label.setText("내보내는 중...")
+        self.export_button.setEnabled(False)
+        self._pending_export_count = len(selected)
+        self._export_worker = BackgroundCallWorker(
+            compare.export_selected, self._right_document, selected, output_json_path)
+        self._export_worker.finished_ok.connect(self._on_export_finished)
+        self._export_worker.finished_error.connect(self._on_export_error)
+        self._export_worker.start()
+
+    def _on_export_finished(self, exported: str) -> None:
+        self.export_button.setEnabled(True)
+        self.status_label.setText(
+            f"[OK] checked review rows exported\nSelected objects: {self._pending_export_count}\n"
+            f"Output JSON: {exported}")
+
+    def _on_export_error(self, message: str) -> None:
+        self.export_button.setEnabled(True)
+        self.status_label.setText(f"[오류] {message}")
 
 
 class LabelSyncTab(QWidget):
@@ -1275,6 +1370,7 @@ class LabelSyncTab(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._worker: BackgroundCallWorker | None = None
 
         self.base_json_input = QLineEdit()
         self.labels_root_input = QLineEdit()
@@ -1302,10 +1398,10 @@ class LabelSyncTab(QWidget):
             "TXT가 없으면 안전을 위해 기존 객체는 유지하고 경고만 남깁니다.")
         guide.setWordWrap(True)
 
-        apply_button = QPushButton("TXT 보정 반영")
-        apply_button.clicked.connect(self._on_apply_clicked)
+        self.apply_button = QPushButton("TXT 보정 반영")
+        self.apply_button.clicked.connect(self._on_apply_clicked)
         apply_row = QHBoxLayout()
-        apply_row.addWidget(apply_button)
+        apply_row.addWidget(self.apply_button)
         apply_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -1363,13 +1459,20 @@ class LabelSyncTab(QWidget):
 
         output_path = self.output_json_input.text().strip() or None
         self.status_label.setPlainText("보정 TXT와 Object DB를 동기화하는 중...\n")
-        try:
-            result = labelsync.synchronize(base_json_path, labels_root, output_path)
-        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
-            self.status_label.appendPlainText(f"[오류] {exc}")
-            return
+        self.apply_button.setEnabled(False)
+        self._worker = BackgroundCallWorker(labelsync.synchronize, base_json_path, labels_root, output_path)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
+
+    def _on_finished_ok(self, result) -> None:
+        self.apply_button.setEnabled(True)
         self.output_json_input.setText(result.outputJsonPath)
         self.status_label.setPlainText(result.to_display_text())
+
+    def _on_finished_error(self, message: str) -> None:
+        self.apply_button.setEnabled(True)
+        self.status_label.appendPlainText(f"[오류] {message}")
 
 
 def _hex_color(value: str) -> QColor:
