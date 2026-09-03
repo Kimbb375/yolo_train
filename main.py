@@ -36,6 +36,7 @@ import json
 import compare
 import gpu_setup
 import inference
+import labelsync
 import objectdb
 import review
 import sourceimage
@@ -1115,6 +1116,109 @@ class CompareTab(QWidget):
         self.status_label.setText(f"[OK] checked review rows exported\nSelected objects: {len(selected)}\nOutput JSON: {exported}")
 
 
+class LabelSyncTab(QWidget):
+    """9. TXT 보정 반영 — 외부 라벨링 프로그램에서 고친 YOLO TXT를 기준으로 8번 Object DB의
+    객체 좌표/삭제/추가를 동기화."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.base_json_input = QLineEdit()
+        self.labels_root_input = QLineEdit()
+        self.output_json_input = QLineEdit()
+        self.status_label = QPlainTextEdit()
+        self.status_label.setReadOnly(True)
+
+        form = QGridLayout()
+        form.addWidget(QLabel("8번 기준 JSON"), 0, 0)
+        form.addWidget(self.base_json_input, 0, 1)
+        form.addWidget(self._browse_file_button(self.base_json_input), 0, 2)
+
+        form.addWidget(QLabel("보정 TXT 폴더"), 1, 0)
+        form.addWidget(self.labels_root_input, 1, 1)
+        form.addWidget(self._browse_folder_button(self.labels_root_input), 1, 2)
+
+        form.addWidget(QLabel("출력 JSON (비우면 <기준>_txt_synced.json)"), 2, 0)
+        form.addWidget(self.output_json_input, 2, 1)
+        form.addWidget(self._browse_save_button(self.output_json_input), 2, 2)
+
+        guide = QLabel(
+            "TXT 기준 규칙: 수정된 YOLO 라벨(0 cx cy width height)이 최종 값입니다. 빈 TXT는 해당 타일의 "
+            "객체 삭제로 처리하며, 여러 줄은 객체 추가로 반영합니다.\n"
+            "보정 TXT 폴더에는 8번 내보내기 폴더 자체 또는 그 안의 labels 폴더를 지정하세요. JSON에 등록된 "
+            "TXT가 없으면 안전을 위해 기존 객체는 유지하고 경고만 남깁니다.")
+        guide.setWordWrap(True)
+
+        apply_button = QPushButton("TXT 보정 반영")
+        apply_button.clicked.connect(self._on_apply_clicked)
+        apply_row = QHBoxLayout()
+        apply_row.addWidget(apply_button)
+        apply_row.addStretch(1)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(guide)
+        layout.addLayout(apply_row)
+        layout.addWidget(self.status_label, stretch=1)
+
+    def _browse_file_button(self, target: QLineEdit) -> QPushButton:
+        button = QPushButton("파일...")
+        button.clicked.connect(lambda: self._pick_file(target))
+        return button
+
+    def _pick_file(self, target: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "8번 기준 JSON 선택", "", "JSON (*.json)")
+        if path:
+            target.setText(path)
+
+    def _browse_folder_button(self, target: QLineEdit) -> QPushButton:
+        button = QPushButton("폴더...")
+        button.clicked.connect(lambda: self._pick_folder(target))
+        return button
+
+    def _pick_folder(self, target: QLineEdit) -> None:
+        path = QFileDialog.getExistingDirectory(self, "보정 TXT 폴더 선택")
+        if path:
+            target.setText(path)
+
+    def _browse_save_button(self, target: QLineEdit) -> QPushButton:
+        button = QPushButton("저장...")
+        button.clicked.connect(lambda: self._pick_save(target))
+        return button
+
+    def _pick_save(self, target: QLineEdit) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "동기화 결과 JSON 저장 경로", "object_db_txt_synced.json", "JSON (*.json)")
+        if path:
+            target.setText(path)
+
+    def _on_apply_clicked(self) -> None:
+        base_json_path = self.base_json_input.text().strip()
+        if not base_json_path:
+            self.status_label.setPlainText("[오류] '8번 기준 JSON' 경로를 입력하거나 [파일...] 버튼으로 선택하세요.")
+            return
+        if not os.path.isfile(base_json_path):
+            self.status_label.setPlainText(f"[오류] 8번 기준 JSON 파일을 찾을 수 없습니다: {base_json_path}")
+            return
+        labels_root = self.labels_root_input.text().strip()
+        if not labels_root:
+            self.status_label.setPlainText("[오류] '보정 TXT 폴더' 경로를 입력하거나 [폴더...] 버튼으로 선택하세요.")
+            return
+        if not os.path.isdir(labels_root):
+            self.status_label.setPlainText(f"[오류] 보정 TXT 폴더를 찾을 수 없습니다: {labels_root}")
+            return
+
+        output_path = self.output_json_input.text().strip() or None
+        self.status_label.setPlainText("보정 TXT와 Object DB를 동기화하는 중...\n")
+        try:
+            result = labelsync.synchronize(base_json_path, labels_root, output_path)
+        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
+            self.status_label.appendPlainText(f"[오류] {exc}")
+            return
+        self.output_json_input.setText(result.outputJsonPath)
+        self.status_label.setPlainText(result.to_display_text())
+
+
 def _hex_color(value: str) -> QColor:
     return QColor(value)
 
@@ -1519,6 +1623,7 @@ def main() -> int:
     tabs.addTab(InferenceTab(), "6. 원본 추론")
     tabs.addTab(ReviewTab(), "7. 후보 검수")
     tabs.addTab(CompareTab(), "8. 매칭/선별")
+    tabs.addTab(LabelSyncTab(), "9. TXT 보정 반영")
 
     banner = UpdateBanner()
     central = QWidget()
