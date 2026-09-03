@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 import json
 
+import centertile
 import compare
 import gpu_setup
 import inference
@@ -203,6 +204,102 @@ class TrainingTileTab(QWidget):
 
         try:
             result = trainingdataset.build(object_db_path, source_root, output_root, sizes or None)
+        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
+            self.log.setPlainText(f"[오류] {exc}")
+            return
+
+        self.log.setPlainText(result.to_display_text())
+
+
+class CenterTileTab(QWidget):
+    """2.2. 중앙 크롭 (보정용) — object_db.json + 원본 TIF -> 개체당 cc 크롭 1장 + YOLO 라벨.
+    외부 라벨링 툴에서 박스 조절/추가 후 9번 TXT 보정 반영에 바로 넣을 수 있는 object_db.json도 같이 출력."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.object_db_input = QLineEdit()
+        self.source_root_input = QLineEdit()
+        self.output_root_input = QLineEdit()
+        self.size_512_checkbox = QCheckBox("512")
+        self.size_640_checkbox = QCheckBox("640")
+        self.size_640_checkbox.setChecked(True)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+
+        form = QGridLayout()
+        form.addWidget(QLabel("object JSON"), 0, 0)
+        form.addWidget(self.object_db_input, 0, 1)
+        form.addWidget(self._browse_button(self._pick_object_db), 0, 2)
+
+        form.addWidget(QLabel("원본 TIF 루트 폴더"), 1, 0)
+        form.addWidget(self.source_root_input, 1, 1)
+        form.addWidget(self._browse_button(self._pick_source_root), 1, 2)
+
+        form.addWidget(QLabel("출력 폴더"), 2, 0)
+        form.addWidget(self.output_root_input, 2, 1)
+        form.addWidget(self._browse_button(self._pick_output_root), 2, 2)
+
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("출력 크기"))
+        size_row.addWidget(self.size_512_checkbox)
+        size_row.addWidget(self.size_640_checkbox)
+        size_row.addStretch(1)
+
+        build_row = QHBoxLayout()
+        build_button = QPushButton("중앙 크롭 생성")
+        build_button.clicked.connect(self._on_build_clicked)
+        build_row.addWidget(build_button)
+        build_row.addStretch(1)
+
+        guide = QLabel(
+            "3번(학습 타일)과 달리 개체당 중앙(cc) 크롭 1장만 만듭니다 - 외부 라벨링 프로그램에서 "
+            "박스를 조절하거나 새 개체를 추가하기 쉽게 하려는 용도.\n"
+            "출력 폴더의 object_db.json은 9번 'TXT 보정 반영' 탭의 '8번 기준 JSON'으로, "
+            "labels 폴더(수정본)는 '보정 TXT 폴더'로 그대로 사용하면 됩니다.")
+        guide.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addLayout(size_row)
+        layout.addLayout(build_row)
+        layout.addWidget(guide)
+        layout.addWidget(self.log, stretch=1)
+
+    @staticmethod
+    def _browse_button(handler) -> QPushButton:
+        button = QPushButton("찾기...")
+        button.clicked.connect(handler)
+        return button
+
+    def _pick_object_db(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "object JSON 선택", "", "JSON (*.json)")
+        if path:
+            self.object_db_input.setText(path)
+
+    def _pick_source_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "원본 TIF 루트 폴더 선택")
+        if path:
+            self.source_root_input.setText(path)
+
+    def _pick_output_root(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
+        if path:
+            self.output_root_input.setText(path)
+
+    def _on_build_clicked(self) -> None:
+        object_db_path = self.object_db_input.text().strip()
+        source_root = self.source_root_input.text().strip()
+        output_root = self.output_root_input.text().strip()
+        sizes = [size for size, checked in ((512, self.size_512_checkbox.isChecked()),
+                                             (640, self.size_640_checkbox.isChecked())) if checked]
+
+        if not object_db_path or not source_root or not output_root:
+            self.log.setPlainText("[오류] object JSON, 원본 TIF 루트, 출력 폴더를 모두 지정하세요.")
+            return
+
+        try:
+            result = centertile.build(object_db_path, source_root, output_root, sizes or None)
         except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
             self.log.setPlainText(f"[오류] {exc}")
             return
@@ -1617,6 +1714,7 @@ def main() -> int:
     tabs = QTabWidget()
     tabs.addTab(LabelDbTab(), "1. 라벨 DB")
     tabs.addTab(SourceVerifyTab(), "2. 원본 검증")
+    tabs.addTab(CenterTileTab(), "2.2 중앙 크롭(보정용)")
     tabs.addTab(TrainingTileTab(), "3. 학습 타일")
     tabs.addTab(YoloOrganizeTab(), "4. YOLO 정렬")
     tabs.addTab(TrainingTab(), "5. 학습")
