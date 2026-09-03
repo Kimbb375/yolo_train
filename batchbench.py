@@ -33,12 +33,14 @@ class BatchBenchResult:
         return "\n".join(lines)
 
 
-def run(model_path: str, tile: int, imgsz: int, device: str) -> BatchBenchResult:
+def run(model_path: str, tile: int, imgsz: int, device: str,
+        max_batch: int = 128, time_budget: float = 45.0) -> BatchBenchResult:
     with tempfile.TemporaryDirectory() as tmp:
         output_path = os.path.join(tmp, "bench_result.json")
         trainerscript.run("bench_batch", [
             "--model", model_path, "--tile", str(tile), "--imgsz", str(imgsz),
-            "--device", device, "--output", output_path])
+            "--device", device, "--output", output_path,
+            "--max-batch", str(max_batch), "--time-budget", str(time_budget)])
         with open(output_path, encoding="utf-8") as fh:
             data = json.load(fh)
     return BatchBenchResult(**data)
