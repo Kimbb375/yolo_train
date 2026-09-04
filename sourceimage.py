@@ -117,12 +117,18 @@ def get_size(path: str) -> tuple[int, int]:
         return page.imagewidth, page.imagelength
 
 
-# ponytail: 전체 이미지를 메모리에 다 읽은 뒤 슬라이스함 (윈도우/타일 단위 부분 읽기 아님).
-# 실제 원본 TIF(수만x수만 픽셀급)로 아직 검증 못 해서 성능 최적화는 보류함.
-# 느리면 tifffile.TiffFile(path).aszarr() + zarr 슬라이싱으로 창 단위 읽기로 바꿀 것.
 def read_full(path: str) -> np.ndarray:
     return tifffile.imread(path)
 
 
+# ponytail: memmap only works for uncompressed/non-tiled/native-byte-order TIFFs (tifffile raises
+# ValueError otherwise) - falls back to the old full-decode-then-slice path for anything else.
+# Memmap lets the OS page in only the rows actually touched by the slice instead of decoding the
+# whole (often multi-gigapixel survey) image on every single crop request - this was the viewer's
+# main slowness source (2번 원본 검증 뷰어).
 def read_crop(path: str, left: int, top: int, right: int, bottom: int) -> np.ndarray:
-    return read_full(path)[top:bottom, left:right]
+    try:
+        mapped = tifffile.memmap(path, mode="r")
+    except ValueError:
+        return read_full(path)[top:bottom, left:right]
+    return np.array(mapped[top:bottom, left:right])

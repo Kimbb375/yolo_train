@@ -9,6 +9,8 @@ trainer/train.py는 원래부터 순수 파이썬(ultralytics 호출)이라 로�
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Sequence
 
 import trainerscript
@@ -69,3 +71,29 @@ def build_train_args(
 def run(args: Sequence[str]) -> None:
     """trainer/train.py의 main()을 같은 프로세스 안에서 호출함 (서브프로세스 없음)."""
     trainerscript.run("train", args)
+
+
+# ponytail: 이 파일의 나머지 함수들과 달리 여기만 서브프로세스로 띄움 — DDP는 torchrun이
+# 프로세스를 시작하기 *전에* RANK/WORLD_SIZE/LOCAL_RANK/MASTER_ADDR/MASTER_PORT를 심어줘야
+# trainer/train.py의 --multinode(enable_multinode_ddp)가 동작함. 이미 이 GUI 프로세스 안에서
+# ultralytics가 import돼 있으면 RANK/LOCAL_RANK가 -1로 이미 굳어 있어서(모듈 임포트 시점에
+# 한 번만 읽는 전역값) 실행 중에 os.environ만 바꿔서는 못 고침 — 그래서 인프로세스 호출을
+# 포기하고 실제 별도 프로세스로 띄움. 5번 학습의 다른 경로(단일 노드)는 그대로 인프로세스 유지.
+# torch.distributed.run 대신 trainer/torchrun_launcher.py를 씀: 이 torch 빌드는 Windows에서
+# TCPStore(use_libuv=True)가 기본값이라 그냥 torchrun을 쓰면 시작하자마자 DistStoreError로
+# 죽음 (_ddp_windows_libuv_fix.py 참고). 실제 2프로세스 로컬 시뮬레이션으로 검증함.
+def build_multinode_command(
+    args: Sequence[str], node_count: int, node_rank: int, master_addr: str, master_port: str,
+) -> list[str]:
+    python_exe = os.path.join(os.path.dirname(sys.executable), "python.exe")
+    launcher_path = os.path.join(trainerscript.TRAINER_DIR, "torchrun_launcher.py")
+    script_path = os.path.join(trainerscript.TRAINER_DIR, "train.py")
+    return [
+        python_exe, launcher_path,
+        "--nnodes", str(node_count),
+        "--node-rank", str(node_rank),
+        "--nproc_per_node", "1",
+        "--master_addr", master_addr,
+        "--master_port", str(master_port),
+        script_path, *args, "--multinode",
+    ]

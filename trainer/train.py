@@ -73,6 +73,68 @@ def ensure_mixed_dataset_yaml(dataset_roots: list[Path], image_size: int, projec
     return yaml_path
 
 
+# ponytail: ultralytics' BaseTrainer computes world_size from len(device.split(",")), which is
+# always 1 when each node uses a single local GPU ("0"), so it never calls _setup_ddp() across
+# nodes. Patched after torchrun has already set RANK/LOCAL_RANK/WORLD_SIZE (multi-node launch),
+# so this only forces the world_size ultralytics itself would use if the device string listed
+# every GPU on one machine. Verified against the installed ultralytics/engine/trainer.py; a future
+# ultralytics upgrade that changes BaseTrainer.__init__ or _setup_ddp needs this re-checked.
+def enable_multinode_ddp():
+    world_size_env = os.environ.get("WORLD_SIZE")
+    if not world_size_env or int(world_size_env) <= 1 or "LOCAL_RANK" not in os.environ:
+        raise RuntimeError(
+            "--multinode requires being launched via torchrun with WORLD_SIZE>1 "
+            "(e.g. python -m torch.distributed.run --nnodes=... --node_rank=... "
+            "--nproc_per_node=1 --master_addr=... --master_port=... train.py ...)."
+        )
+
+    from _ddp_windows_libuv_fix import patch_tcpstore_no_libuv
+    patch_tcpstore_no_libuv()  # this process's own dist.init_process_group needs it too
+
+    from ultralytics.engine.trainer import BaseTrainer
+
+    world_size = int(world_size_env)
+    rank = int(os.environ["RANK"])
+    original_init = BaseTrainer.__init__
+    original_setup_ddp = BaseTrainer._setup_ddp
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.world_size = world_size
+        self.ddp = False  # already inside the torchrun-managed process group; do not re-spawn
+
+    def patched_setup_ddp(self):
+        original_setup_ddp(self)
+        _print_ddp_sync_check(self, rank, world_size, "init")
+        self.add_callback(
+            "on_train_epoch_end",
+            lambda trainer: _print_ddp_sync_check(trainer, rank, world_size, f"epoch {trainer.epoch + 1}"),
+        )
+
+    BaseTrainer.__init__ = patched_init
+    BaseTrainer._setup_ddp = patched_setup_ddp
+
+
+# ponytail: proves the nodes are actually talking, not just guessing from log timing/GPU usage.
+# all_reduce(SUM) over each rank's own rank number only comes out as 0+1+...+(world_size-1) if every
+# node's process really joined the same NCCL group and exchanged data over the network - if a node
+# never connected this call just hangs (visible in the log as a stall) instead of printing a wrong
+# number, so there's no way to get a false "OK" here.
+def _print_ddp_sync_check(trainer, rank: int, world_size: int, label: str) -> None:
+    import torch
+    import torch.distributed as dist
+
+    tensor = torch.tensor([float(rank)], device=trainer.device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    expected = world_size * (world_size - 1) / 2
+    status = "OK (synced)" if abs(tensor.item() - expected) < 1e-6 else "MISMATCH"
+    print(
+        f"[DDP sync check @ {label}] rank={rank}/{world_size} all_reduce_sum={tensor.item():.1f} "
+        f"expected={expected:.1f} -> {status}",
+        flush=True,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, help="Dataset folder, or multiple folders separated by semicolon/newline/pipe")
@@ -84,6 +146,7 @@ def main():
     parser.add_argument("--project", default=str(ROOT / "data" / "output" / "runs"))
     parser.add_argument("--name", default="yolo11m_whale")
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--multinode", action="store_true", help="Join a torchrun-launched multi-node DDP job (this node's local GPU only, e.g. --device 0)")
     parser.add_argument("--degrees", type=float, default=10.0)
     parser.add_argument("--translate", type=float, default=0.05)
     parser.add_argument("--scale", type=float, default=0.25)
@@ -107,6 +170,13 @@ def main():
     model_path = Path(args.model)
     if not model_path.exists():
         raise FileNotFoundError(f"Model file was not found: {model_path}")
+
+    if args.multinode:
+        if "," in args.device:
+            raise ValueError("--multinode expects a single local GPU in --device (e.g. 0), not a comma list.")
+        if args.batch.lower() == "auto":
+            raise ValueError("--multinode requires an explicit --batch (AutoBatch only runs outside DDP).")
+        enable_multinode_ddp()
 
     data_yaml = ensure_dataset_yaml(dataset_roots[0], args.imgsz) if len(dataset_roots) == 1 else ensure_mixed_dataset_yaml(dataset_roots, args.imgsz, Path(args.project), args.name)
 

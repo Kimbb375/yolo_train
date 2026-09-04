@@ -103,7 +103,7 @@ def render_preview(source_path: str, primary: dict, overlaps: list[dict], other_
     width, height = sourceimage.get_size(source_path)
     crop_bounds = _get_crop_bounds(width, height, primary["globalBox"])
     left, top, right, bottom = crop_bounds
-    array = sourceimage.read_full(source_path)[top:bottom, left:right]
+    array = sourceimage.read_crop(source_path, left, top, right, bottom)
     image = Image.fromarray(array).convert("RGB")
     draw = ImageDraw.Draw(image)
 

@@ -546,6 +546,17 @@ def main():
 
     resume = get_bool(options, "resume", True)
 
+    # ponytail: inference has no gradient sync to do, so multi-GPU speedup is just running
+    # one independent process per GPU over a disjoint slice of the TIF list (no DDP needed).
+    # Launch this script once per GPU with matching num_shards and a distinct shard/device,
+    # e.g. --options "shard=0,num_shards=2,device=0" and "shard=1,num_shards=2,device=1".
+    num_shards = get_int(options, "num_shards", 1)
+    shard = get_int(options, "shard", 0)
+    if num_shards > 1:
+        if not (0 <= shard < num_shards):
+            raise ValueError(f"shard must be between 0 and {num_shards - 1}")
+        args.run_name = f"{args.run_name}_shard{shard}of{num_shards}"
+
     from ultralytics import YOLO
 
     source_root = Path(args.source)
@@ -561,6 +572,10 @@ def main():
     all_tif_paths = find_tif_paths(source_root, recursive)
     if not all_tif_paths:
         raise FileNotFoundError(f"No TIF files were found under {source_root} (recursive={recursive})")
+    if num_shards > 1:
+        all_tif_paths = [p for i, p in enumerate(all_tif_paths) if i % num_shards == shard]
+        if not all_tif_paths:
+            raise FileNotFoundError(f"Shard {shard}/{num_shards} has no TIF files assigned.")
 
     all_candidates = []
     per_tif_records = []

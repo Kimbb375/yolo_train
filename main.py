@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import subprocess
 import sys
 from typing import Optional
 
@@ -507,6 +508,45 @@ class BackgroundCallWorker(QThread):
         self.finished_ok.emit(result)
 
 
+class BackgroundProcessWorker(QThread):
+    """실제 서브프로세스(torchrun)를 띄우고 stdout을 Qt 시그널로 스트리밍 (멀티노드 DDP 전용).
+
+    BackgroundCallWorker와 달리 같은 프로세스 안에서 함수를 부르지 않고 진짜 별도 OS 프로세스를
+    실행함 - training.build_multinode_command의 이유 참고."""
+
+    output = Signal(str)
+    finished_ok = Signal(object)
+    finished_error = Signal(str)
+
+    def __init__(self, command: list[str]) -> None:
+        super().__init__()
+        self._command = command
+        self._process: subprocess.Popen | None = None
+
+    def run(self) -> None:
+        try:
+            self._process = subprocess.Popen(
+                self._command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            )
+        except Exception as exc:  # noqa: BLE001 - 프로세스 시작 자체 실패
+            self.finished_error.emit(str(exc))
+            return
+
+        assert self._process.stdout is not None
+        for line in self._process.stdout:
+            self.output.emit(line)
+        exit_code = self._process.wait()
+        if exit_code == 0:
+            self.finished_ok.emit(None)
+        else:
+            self.finished_error.emit(f"Training process exited with code {exit_code}.")
+
+    def stop(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            self._process.kill()
+
+
 class TrainingTab(QWidget):
     """5. 학습 — trainer/train.py를 서브프로세스 없이 같은 프로세스 안에서 실행."""
 
@@ -536,6 +576,17 @@ class TrainingTab(QWidget):
         self.augmentation_input = QLineEdit(AUGMENTATION_PRESETS["Default"])
         self.augmentation_preset.currentTextChanged.connect(
             lambda name: self.augmentation_input.setText(AUGMENTATION_PRESETS[name]))
+
+        self.multinode_checkbox = QCheckBox("멀티 노드(DDP)")
+        self.node_count_input = QSpinBox()
+        self.node_count_input.setRange(1, 32)
+        self.node_count_input.setValue(2)
+        self.node_rank_input = QSpinBox()
+        self.node_rank_input.setRange(0, 31)
+        self.master_addr_input = QLineEdit()
+        self.master_addr_input.setPlaceholderText("마스터 노드 IP (예: 192.168.0.10)")
+        self.master_port_input = QLineEdit("29500")
+
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
 
@@ -564,6 +615,16 @@ class TrainingTab(QWidget):
         aug_row.addWidget(self.augmentation_preset)
         aug_row.addWidget(self.augmentation_input, stretch=1)
 
+        multinode_row = QHBoxLayout()
+        multinode_row.addWidget(self.multinode_checkbox)
+        multinode_row.addWidget(QLabel("노드 수"))
+        multinode_row.addWidget(self.node_count_input)
+        multinode_row.addWidget(QLabel("순번"))
+        multinode_row.addWidget(self.node_rank_input)
+        multinode_row.addWidget(self.master_addr_input, stretch=1)
+        multinode_row.addWidget(QLabel("포트"))
+        multinode_row.addWidget(self.master_port_input)
+
         self.start_button = QPushButton("학습 시작")
         self.start_button.clicked.connect(self._on_start_clicked)
         build_row = QHBoxLayout()
@@ -574,6 +635,7 @@ class TrainingTab(QWidget):
         layout.addLayout(form)
         layout.addLayout(param_row)
         layout.addLayout(aug_row)
+        layout.addLayout(multinode_row)
         layout.addLayout(build_row)
         layout.addWidget(self.log, stretch=1)
 
@@ -607,19 +669,37 @@ class TrainingTab(QWidget):
             self.log.setPlainText("[오류] 데이터셋 폴더, 초기 모델, runs 출력 폴더를 모두 지정하세요.")
             return
 
+        multinode = self.multinode_checkbox.isChecked()
+        device = self.device_input.text().strip() or "auto"
+        batch = self.batch_input.text().strip() or "auto"
+        if multinode and "," in device:
+            self.log.setPlainText("[오류] 멀티 노드에서는 device에 이 머신의 로컬 GPU 하나만 지정하세요 (예: 0).")
+            return
+        if multinode and batch.lower() == "auto":
+            self.log.setPlainText("[오류] 멀티 노드에서는 batch를 숫자로 직접 지정하세요 (AutoBatch는 DDP 밖에서만 동작).")
+            return
+        if multinode and not self.master_addr_input.text().strip():
+            self.log.setPlainText("[오류] 멀티 노드 마스터 노드 IP를 입력하세요.")
+            return
+
         try:
             args = training.build_train_args(
                 dataset_roots, model_path, self.imgsz_input.value(), self.epochs_input.value(),
-                self.batch_input.text().strip() or "auto", self.device_input.text().strip() or "auto",
-                project, self.name_input.text().strip() or "yolo_whale", self.workers_input.value(),
-                self.augmentation_input.text())
+                batch, device, project, self.name_input.text().strip() or "yolo_whale",
+                self.workers_input.value(), self.augmentation_input.text())
         except ValueError as exc:
             self.log.setPlainText(f"[오류] {exc}")
             return
 
         self.log.setPlainText("학습 시작...\n")
         self.start_button.setEnabled(False)
-        self._worker = BackgroundCallWorker(training.run, args)
+        if multinode:
+            command = training.build_multinode_command(
+                args, self.node_count_input.value(), self.node_rank_input.value(),
+                self.master_addr_input.text().strip(), self.master_port_input.text().strip() or "29500")
+            self._worker = BackgroundProcessWorker(command)
+        else:
+            self._worker = BackgroundCallWorker(training.run, args)
         self._worker.output.connect(self._append_log)
         self._worker.finished_ok.connect(self._on_finished_ok)
         self._worker.finished_error.connect(self._on_finished_error)
