@@ -97,3 +97,23 @@ def build_multinode_command(
         "--master_port", str(master_port),
         script_path, *args, "--multinode",
     ]
+
+
+# ponytail: 실제 학습(데이터셋/모델 로딩) 없이 두 노드가 진짜 통신되는지만 확인하는 최소
+# 테스트. 방화벽/IP/포트 문제인지 YOLO 학습 코드 문제인지 구분하려고 만듦 - 버튼 하나로
+# 양쪽 다 돌릴 수 있어야 매번 cmd/메모장으로 파일 옮기는 걸 안 해도 됨.
+def build_network_test_command(
+    node_count: int, node_rank: int, master_addr: str, master_port: str,
+) -> list[str]:
+    python_exe = os.path.join(os.path.dirname(sys.executable), "python.exe")
+    launcher_path = os.path.join(trainerscript.TRAINER_DIR, "torchrun_launcher.py")
+    script_path = os.path.join(trainerscript.TRAINER_DIR, "ddp_network_test.py")
+    return [
+        python_exe, launcher_path,
+        "--nnodes", str(node_count),
+        "--node-rank", str(node_rank),
+        "--nproc_per_node", "1",
+        "--master_addr", master_addr,
+        "--master_port", str(master_port),
+        script_path,
+    ]

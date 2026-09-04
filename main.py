@@ -627,8 +627,14 @@ class TrainingTab(QWidget):
 
         self.start_button = QPushButton("학습 시작")
         self.start_button.clicked.connect(self._on_start_clicked)
+        self.network_test_button = QPushButton("네트워크 테스트")
+        self.network_test_button.setToolTip(
+            "YOLO 학습 없이 위 노드 수/순번/마스터 IP/포트 설정으로 두 노드가 실제로 "
+            "통신되는지만 빠르게 확인. 양쪽 컴퓨터에서 순번만 다르게 해서 같이 눌러야 함.")
+        self.network_test_button.clicked.connect(self._on_network_test_clicked)
         build_row = QHBoxLayout()
         build_row.addWidget(self.start_button)
+        build_row.addWidget(self.network_test_button)
         build_row.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -693,6 +699,7 @@ class TrainingTab(QWidget):
 
         self.log.setPlainText("학습 시작...\n")
         self.start_button.setEnabled(False)
+        self.network_test_button.setEnabled(False)
         if multinode:
             command = training.build_multinode_command(
                 args, self.node_count_input.value(), self.node_rank_input.value(),
@@ -705,17 +712,36 @@ class TrainingTab(QWidget):
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
 
+    def _on_network_test_clicked(self) -> None:
+        if not self.master_addr_input.text().strip():
+            self.log.setPlainText("[오류] 마스터 노드 IP를 입력하세요.")
+            return
+
+        self.log.setPlainText("네트워크 테스트 시작 (양쪽 컴퓨터 다 눌러야 함)...\n")
+        self.start_button.setEnabled(False)
+        self.network_test_button.setEnabled(False)
+        command = training.build_network_test_command(
+            self.node_count_input.value(), self.node_rank_input.value(),
+            self.master_addr_input.text().strip(), self.master_port_input.text().strip() or "29500")
+        self._worker = BackgroundProcessWorker(command)
+        self._worker.output.connect(self._append_log)
+        self._worker.finished_ok.connect(self._on_finished_ok)
+        self._worker.finished_error.connect(self._on_finished_error)
+        self._worker.start()
+
     def _append_log(self, text: str) -> None:
         self.log.moveCursor(self.log.textCursor().MoveOperation.End)
         self.log.insertPlainText(text)
 
     def _on_finished_ok(self, _result) -> None:
-        self._append_log("\n[OK] 학습 종료.\n")
+        self._append_log("\n[OK] 완료.\n")
         self.start_button.setEnabled(True)
+        self.network_test_button.setEnabled(True)
 
     def _on_finished_error(self, message: str) -> None:
         self._append_log(f"\n[오류] {message}\n")
         self.start_button.setEnabled(True)
+        self.network_test_button.setEnabled(True)
 
 
 class InferenceTab(QWidget):
