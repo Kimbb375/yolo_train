@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -784,7 +785,7 @@ class InferenceTab(QWidget):
         self.detail_log = QPlainTextEdit()
         self.detail_log.setReadOnly(True)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setFormat("현재 TIF 타일 진행: %v / %m")
+        self.progress_bar.setFormat("전체 진행: %v / %m 파일 (%p%)")
 
         source_buttons = QHBoxLayout()
         source_buttons.addWidget(self._browse_button(self._pick_source, "폴더 선택..."))
@@ -990,12 +991,12 @@ class InferenceTab(QWidget):
 
     def _route_line(self, line: str) -> None:
         self._log_target_for(line).appendPlainText(line)
-        match = re.search(r"processed (\d+)/(\d+) tiles", line)
+        match = re.search(r"\[FILE PROGRESS\] (\d+)/(\d+)", line)
         if match:
-            expected = int(match.group(2))
-            if expected > 0:
-                self.progress_bar.setMaximum(expected)
-                self.progress_bar.setValue(min(int(match.group(1)), expected))
+            total = int(match.group(2))
+            if total > 0:
+                self.progress_bar.setMaximum(total)
+                self.progress_bar.setValue(min(int(match.group(1)), total))
 
     def _log_target_for(self, line: str) -> QPlainTextEdit:
         # C# InferenceTilingRunner의 IsTifLoadLog/IsTifDetailLog 분류 규칙 그대로 포팅.
@@ -1074,6 +1075,9 @@ class ReviewTab(QWidget):
         self.jump_input.setRange(1, 1000)
         self.jump_input.setValue(1)
         self.image_label = CandidateImageLabel()
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setRange(0, 0)
+        self.position_slider.valueChanged.connect(self._on_slider_changed)
         self.info_label = QLabel("-")
         self.status_label = QLabel("")
 
@@ -1121,6 +1125,7 @@ class ReviewTab(QWidget):
         layout.addLayout(load_row)
         layout.addWidget(self.filter_status_label)
         layout.addWidget(self.image_label, stretch=1)
+        layout.addWidget(self.position_slider)
         layout.addWidget(self.info_label)
         layout.addLayout(nav_row)
         layout.addWidget(self.status_label)
@@ -1180,8 +1185,17 @@ class ReviewTab(QWidget):
             self.status_label.setText(f"[오류] {exc}")
             return
         self._index = self._find_index_by_candidate_id(current_candidate_id)
+        self.position_slider.blockSignals(True)
+        self.position_slider.setRange(0, max(0, len(self._candidates) - 1))
+        self.position_slider.blockSignals(False)
         self.status_label.setText(f"{len(all_candidates)}개 중 {len(self._candidates)}개 표시 (필터 적용됨)")
         self.image_label.setFocus()
+        self._refresh()
+
+    def _on_slider_changed(self, value: int) -> None:
+        if not self._candidates or value == self._index:
+            return
+        self._index = value
         self._refresh()
 
     def _find_index_by_candidate_id(self, candidate_id: Optional[int]) -> int:
@@ -1237,6 +1251,10 @@ class ReviewTab(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
+        self.position_slider.blockSignals(True)
+        self.position_slider.setValue(self._index)
+        self.position_slider.blockSignals(False)
+
         candidate = self._current()
         if candidate is None:
             self.image_label.setText("표시할 후보가 없습니다.")

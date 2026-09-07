@@ -718,6 +718,10 @@ def main():
                 f"merged={len(merged)}, infer={processed['inferSeconds']:.2f}s",
                 flush=True,
             )
+            # main.py InferenceTab이 이 줄로 전체 진행률 바를 갱신함 - 파일마다 타일 수가
+            # 달라서 "타일 진행"만 보여주면 파일 넘어갈 때마다 바가 되돌아가 보임(사용자
+            # 보고: "바가 왔다갔다"). 전체 파일 중 완료 개수 기준이 훨씬 안정적임.
+            print(f"[FILE PROGRESS] {completed_files}/{len(all_tif_paths)}", flush=True)
             print(f"Saved intermediate candidates: {run_root / 'candidates.json'}", flush=True)
 
             del processed
