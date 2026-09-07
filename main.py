@@ -1027,13 +1027,17 @@ class CandidateImageLabel(QLabel):
         self.setStyleSheet("background-color: #222; color: #ccc;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._box: Optional[tuple[float, float, float, float]] = None
+        self._box_color = QColor("red")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         self.setFocus()
         super().mousePressEvent(event)
 
-    def set_box(self, box: Optional[tuple[float, float, float, float]]) -> None:
+    def set_box(self, box: Optional[tuple[float, float, float, float]],
+                color: Optional[QColor] = None) -> None:
         self._box = box
+        if color is not None:
+            self._box_color = color
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -1047,7 +1051,7 @@ class CandidateImageLabel(QLabel):
         rect = QRect(round(offset_x + left), round(offset_y + top),
                      round(right - left), round(bottom - top))
         painter = QPainter(self)
-        pen = QPen(QColor("red"))
+        pen = QPen(self._box_color)
         pen.setWidth(2)
         painter.setPen(pen)
         painter.drawRect(rect)
@@ -1262,6 +1266,17 @@ class ReviewTab(QWidget):
             self.info_label.setText("-")
             return
 
+        output_root = self._output_root()
+        status = []
+        if output_root and review.is_confirmed(candidate, output_root):
+            status.append("CONFIRMED")
+        if output_root and review.is_negative(candidate, output_root):
+            status.append("NEGATIVE")
+        status_text = "/".join(status) if status else "미분류"
+        # 확정(Space)=초록, 고래 아님(X)=노랑, 미분류=빨강 - 검수 상태를 박스 색으로 바로 보이게 함.
+        box_color = QColor("lime") if "CONFIRMED" in status else (
+            QColor("yellow") if "NEGATIVE" in status else QColor("red"))
+
         pixmap = QPixmap(candidate.candidateImagePath)
         if pixmap.isNull():
             self.image_label.setText(f"이미지를 불러올 수 없음: {candidate.candidateImagePath}")
@@ -1278,17 +1293,9 @@ class ReviewTab(QWidget):
                 scale_y = scaled.height() / crop.height
                 self.image_label.set_box((
                     (box.left - crop.left) * scale_x, (box.top - crop.top) * scale_y,
-                    (box.right - crop.left) * scale_x, (box.bottom - crop.top) * scale_y))
+                    (box.right - crop.left) * scale_x, (box.bottom - crop.top) * scale_y), box_color)
             else:
                 self.image_label.set_box(None)
-
-        output_root = self._output_root()
-        status = []
-        if output_root and review.is_confirmed(candidate, output_root):
-            status.append("CONFIRMED")
-        if output_root and review.is_negative(candidate, output_root):
-            status.append("NEGATIVE")
-        status_text = "/".join(status) if status else "미분류"
 
         box = candidate.globalBox
         self.info_label.setText(
