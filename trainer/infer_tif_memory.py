@@ -392,6 +392,7 @@ def run_batch(model, tiles, meta, args, candidates, raw_path=None):
         device=None if str(args.device).lower() == "auto" else args.device,
         batch=len(tiles),
         max_det=args.max_det,
+        half=args.half,
         save=False,
         save_txt=False,
         verbose=False,
@@ -525,6 +526,7 @@ def main():
     args.conf = get_float(options, "conf", 0.1)
     args.iou = get_float(options, "iou", 0.6)
     args.device = get_str(options, "device", "0")
+    half_option = get_bool(options, "half", True)
     args.max_det = get_int(options, "max_det", 300)
     args.edge_filter = get_bool(options, "edge_filter", True)
     args.edge_margin = get_int(options, "edge_margin", 32)
@@ -558,6 +560,13 @@ def main():
         args.run_name = f"{args.run_name}_shard{shard}of{num_shards}"
 
     from ultralytics import YOLO
+    import torch
+
+    # ponytail: half=True는 CUDA에서만 지원됨(CPU에 쓰면 ultralytics가 에러 냄) - device가
+    # "auto"/"0"/"0,1"처럼 GPU를 가리켜도 실제 이 PC에 CUDA가 없으면(gpu_setup 미설치 등)
+    # torch.cuda.is_available()이 False라 자동으로 꺼짐. 기본 모델 FP32 대비 보통
+    # 1.3~2배 빠름(RTX 계열 텐서코어) - options에 half=0 주면 끌 수 있음(정확도 비교용 등).
+    args.half = half_option and str(args.device).lower() != "cpu" and torch.cuda.is_available()
 
     source_root = Path(args.source)
     run_root = Path(args.output) / args.run_name
