@@ -12,3 +12,7 @@ run_number) 형식 — push마다 자동으로 매겨지는 사람이 읽을 수
 
 COMMIT_SHA: str | None = None
 BUILD_VERSION: str | None = None
+# pyproject.toml+uv.lock의 git blob 해시 조합 - 이 값이 최신 릴리스와 같으면 의존성
+# (site-packages) 변경 없이 소스(.py)만 덮어써도 안전하다는 뜻 -> updatecheck.py가
+# "빠른 업데이트"(update.zip, 소스만) 가능 여부 판단에 씀. 다르면 전체 zip 재설치 필요.
+DEPS_SHA: str | None = None

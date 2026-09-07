@@ -24,9 +24,12 @@ jobs:
         shell: pwsh
         run: |
           $version = "$((Get-Date).ToUniversalTime().ToString('yyyy.MM.dd')).${{ github.run_number }}"
+          $depsSha = "$(git rev-parse HEAD:pyproject.toml)-$(git rev-parse HEAD:uv.lock)"
           echo "BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          echo "DEPS_SHA=$depsSha" >> $env:GITHUB_ENV
           Set-Content -Path appversion.py -Value "COMMIT_SHA = `"${{ github.sha }}`""
           Add-Content -Path appversion.py -Value "BUILD_VERSION = `"$version`""
+          Add-Content -Path appversion.py -Value "DEPS_SHA = `"$depsSha`""
 
       - name: Assemble portable app folder
         shell: pwsh
@@ -54,10 +57,14 @@ jobs:
           Set-Content -Path "$appDir\Run.bat" -Value $runBat -Encoding ASCII
           Compress-Archive -Path $appDir -DestinationPath dist\TrainingDataExtractor.zip
 
+          # 소스(.py)만 담은 작은 업데이트 zip - site-packages/python은 안 건드림
+          # (uv.lock/pyproject.toml 안 바뀐 버전 사이의 "빠른 업데이트"용, updatecheck.py 참고)
+          Compress-Archive -Path "$appDir\app\*" -DestinationPath dist\update.zip
+
       - name: Write version manifest
         shell: pwsh
         run: |
-          $manifest = @{ sha = "${{ github.sha }}"; version = "${{ env.BUILD_VERSION }}" } | ConvertTo-Json -Compress
+          $manifest = @{ sha = "${{ github.sha }}"; version = "${{ env.BUILD_VERSION }}"; depsSha = "${{ env.DEPS_SHA }}" } | ConvertTo-Json -Compress
           Set-Content -Path dist\version.json -Value $manifest
 
       - name: Publish rolling release
@@ -75,6 +82,7 @@ jobs:
             https://github.com/${{ github.repository }}/releases/latest/download/TrainingDataExtractor.zip
           files: |
             dist/TrainingDataExtractor.zip
+            dist/update.zip
             dist/version.json
           make_latest: true
         env:

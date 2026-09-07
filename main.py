@@ -1957,17 +1957,30 @@ class SourceVerifyTab(QWidget):
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
 
-class UpdateBanner(QLabel):
-    """업데이트 알림 배너 — 새 버전 있을 때만 나타남(없으면 높이 0, 자리 안 차지)."""
+class UpdateBanner(QWidget):
+    """업데이트 알림 배너 — 새 버전 있을 때만 나타남(없으면 높이 0, 자리 안 차지).
+    의존성 변경 없는 버전이면 "빠른 업데이트" 버튼으로 소스만 받아 덮어쓸 수 있음
+    (updatecheck.apply_update - 전체 zip 재다운로드 없이 재시작만 하면 됨)."""
+
+    apply_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        self.setOpenExternalLinks(True)
-        self.setStyleSheet("background-color: #fff3cd; color: #664d03; padding: 6px;")
+        self.setStyleSheet("background-color: #fff3cd; color: #664d03;")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.label = QLabel()
+        self.label.setOpenExternalLinks(True)
+        self.apply_button = QPushButton("빠른 업데이트 적용")
+        self.apply_button.hide()
+        self.apply_button.clicked.connect(self.apply_requested.emit)
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.apply_button)
         self.hide()
 
-    def show_message(self, html: str) -> None:
-        self.setText(html)
+    def show_message(self, html: str, fast: bool = False) -> None:
+        self.label.setText(html)
+        self.apply_button.setVisible(fast)
         self.show()
 
 
@@ -1999,8 +2012,24 @@ def main() -> int:
     window.resize(820, 560)
     window.show()
 
+    def _on_update_checked(info: Optional[dict]) -> None:
+        if info:
+            banner.show_message(info["message"], fast=info["fast"])
+
+    def _on_apply_update() -> None:
+        banner.apply_button.setEnabled(False)
+        apply_worker = BackgroundCallWorker(updatecheck.apply_update)
+        apply_worker.finished_ok.connect(
+            lambda _ok: banner.show_message("업데이트 적용 완료. 앱을 재시작하세요."))
+        apply_worker.finished_error.connect(
+            lambda exc: banner.show_message(f"업데이트 적용 실패: {exc}"))
+        window._apply_update_worker = apply_worker  # QThread가 GC되지 않게 참조 유지
+        apply_worker.start()
+
+    banner.apply_requested.connect(_on_apply_update)
+
     update_worker = BackgroundCallWorker(updatecheck.check_for_update)
-    update_worker.finished_ok.connect(lambda message: banner.show_message(message) if message else None)
+    update_worker.finished_ok.connect(_on_update_checked)
     window._update_worker = update_worker  # QThread가 GC되지 않게 참조 유지
     update_worker.start()
 
