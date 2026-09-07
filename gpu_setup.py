@@ -64,16 +64,19 @@ def status() -> str:
     return "not_installed"
 
 
-def ensure_cuda_torch(log=print) -> bool:
+def ensure_cuda_torch(log=print, force: bool = False) -> bool:
     """CUDA torch를 바로 쓸 수 있으면 True. 없으면 설치를 시도(성공하든 실패하든) 후 항상
-    False - 이번 실행에서는 못 쓰고(같은 프로세스 제약) 재시작해야 적용됨."""
+    False - 이번 실행에서는 못 쓰고(같은 프로세스 제약) 재시작해야 적용됨.
+
+    force=True: 이전에 설치 성공 기록이 있어도(예: 드라이버 업데이트 후 재시도) 다시 pip
+    install을 돎 - GPU 설치 버튼을 사용자가 직접 누른 경우에만 씀."""
     if _cuda_available():
         return True
 
     if not appversion.COMMIT_SHA:
         return False  # 로컬 개발(uv run) - dev venv에 자동 설치는 안 함(이미 있으면 위에서 True로 빠짐)
 
-    if _already_attempted_this_version():
+    if not force and _already_attempted_this_version():
         log("[GPU] cu126 torch는 이미 설치를 시도했지만 이 PC에서 CUDA를 못 찾습니다 "
             "(GPU가 없거나 드라이버 미설치일 수 있음) - CPU로 진행합니다.")
         return False

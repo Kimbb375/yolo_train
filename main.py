@@ -897,11 +897,12 @@ class InferenceTab(QWidget):
         }[state]
         self.gpu_status_label.setText(text)
         self.gpu_install_button.setVisible(state != "available")
+        self.gpu_install_button.setText("GPU 재설치 시도" if state == "unavailable" else "GPU torch 설치")
 
     def _on_gpu_install_clicked(self) -> None:
         self.gpu_install_button.setEnabled(False)
         self.summary_log.appendPlainText("\nGPU torch 설치 시작...")
-        self._gpu_worker = BackgroundCallWorker(gpu_setup.ensure_cuda_torch)
+        self._gpu_worker = BackgroundCallWorker(lambda: gpu_setup.ensure_cuda_torch(force=True))
         self._gpu_worker.output.connect(self._on_worker_output)
         self._gpu_worker.finished_ok.connect(self._on_gpu_install_finished)
         self._gpu_worker.finished_error.connect(self._on_gpu_install_finished)
