@@ -771,6 +771,8 @@ class InferenceTab(QWidget):
         self.model_input = QLineEdit()
         self.output_input = QLineEdit()
         self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText(
+            "비워두면 매번 새 폴더(시간 기준) - 중단 후 이어서 하려면 지난번과 같은 이름을 입력하세요")
         self.options_input = QLineEdit(
             "tile_mode=memory, resume=1, tile=640, overlap=0.2, conf=0.1, iou=0.6, imgsz=640, batch=auto, "
             "device=0, max_det=300, merge_iou=0.5, candidate_crop=640, candidate_context=120, candidate_view=tile")
