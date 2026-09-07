@@ -1277,9 +1277,10 @@ class ReviewTab(QWidget):
         box_color = QColor("lime") if "CONFIRMED" in status else (
             QColor("yellow") if "NEGATIVE" in status else QColor("red"))
 
-        pixmap = QPixmap(candidate.candidateImagePath)
+        image_path = candidate.resolved_image_path()
+        pixmap = QPixmap(image_path)
         if pixmap.isNull():
-            self.image_label.setText(f"이미지를 불러올 수 없음: {candidate.candidateImagePath}")
+            self.image_label.setText(f"이미지를 불러올 수 없음: {image_path}")
             self.image_label.set_box(None)
         else:
             scaled = pixmap.scaled(

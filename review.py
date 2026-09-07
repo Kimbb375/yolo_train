@@ -37,6 +37,18 @@ class ReviewCandidate:
     candidateImagePath: str
     candidateLabelPath: str
     candidateInfoPath: str
+    # candidates.json이 있던 폴더 - candidateImagePath 등이 그대로 안 맞을 때만
+    # (다른 PC로 옮겨졌다거나) resolved_*_path()가 재탐색하는 데 씀.
+    assetDirectory: str = ""
+
+    def resolved_image_path(self) -> str:
+        return _resolve_asset_path(self.assetDirectory, self.candidateImagePath)
+
+    def resolved_label_path(self) -> str:
+        return _resolve_asset_path(self.assetDirectory, self.candidateLabelPath)
+
+    def resolved_info_path(self) -> str:
+        return _resolve_asset_path(self.assetDirectory, self.candidateInfoPath)
 
 
 def _resolve_asset_path(candidate_json_directory: str, asset_path: str) -> str:
@@ -59,6 +71,11 @@ def _resolve_asset_path(candidate_json_directory: str, asset_path: str) -> str:
 
 
 def load_candidates(candidate_json_path: str) -> list[ReviewCandidate]:
+    """경로 재탐색(_resolve_asset_path)은 여기서 미리 다 하지 않음 - 후보가 수천 개면
+    이미지/라벨/정보 3개 경로마다 존재 여부(isfile) 확인이 네트워크 드라이브에서
+    특히 느려서 "불러오기" 자체가 오래 걸리는 원인이었음. 대신 candidateId별로
+    ReviewCandidate.resolved_*_path()가 실제로 그 후보를 보거나 저장할 때만
+    (한 번에 하나씩) 재탐색하도록 미룸."""
     with open(candidate_json_path, encoding="utf-8") as fh:
         document = json.load(fh)
 
@@ -73,9 +90,8 @@ def load_candidates(candidate_json_path: str) -> list[ReviewCandidate]:
         candidates.append(ReviewCandidate(
             item["candidateId"], item["sourceBaseName"], item["sourceTifName"], item["sourceTifPath"],
             item["tileName"], item["confidence"], global_box, crop_box,
-            _resolve_asset_path(directory, item.get("candidateImagePath", "")),
-            _resolve_asset_path(directory, item.get("candidateLabelPath", "")),
-            _resolve_asset_path(directory, item.get("candidateInfoPath", ""))))
+            item.get("candidateImagePath", ""), item.get("candidateLabelPath", ""),
+            item.get("candidateInfoPath", ""), directory))
 
     candidates.sort(key=lambda c: (c.sourceTifName.lower(), c.globalBox.top, c.globalBox.left))
     return candidates
@@ -199,9 +215,10 @@ def save_confirmed(candidate: ReviewCandidate, output_root: str) -> dict:
     _write_class_files(records_root)
 
     result = get_confirmed_save_result(candidate, output_root)
-    _copy_if_exists(candidate.candidateImagePath, result["imagePath"])
-    if os.path.isfile(candidate.candidateLabelPath):
-        shutil.copy2(candidate.candidateLabelPath, result["labelPath"])
+    _copy_if_exists(candidate.resolved_image_path(), result["imagePath"])
+    label_path = candidate.resolved_label_path()
+    if os.path.isfile(label_path):
+        shutil.copy2(label_path, result["labelPath"])
     else:
         with open(result["labelPath"], "w", encoding="utf-8") as fh:
             fh.write(_build_yolo_label(candidate.globalBox, candidate.candidateCropBox) + "\n")
@@ -220,7 +237,7 @@ def save_negative(candidate: ReviewCandidate, output_root: str) -> dict:
     _write_class_files(records_root)
 
     result = get_negative_save_result(candidate, output_root)
-    _copy_if_exists(candidate.candidateImagePath, result["imagePath"])
+    _copy_if_exists(candidate.resolved_image_path(), result["imagePath"])
     with open(result["labelPath"], "w", encoding="utf-8") as fh:
         fh.write("")
 
