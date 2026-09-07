@@ -1169,16 +1169,27 @@ class ReviewTab(QWidget):
         if not candidate_json_path:
             self.status_label.setText("[오류] candidates.json 경로를 지정하세요.")
             return
+        # 추론이 계속 돌면서 candidates.json에 후보가 계속 추가되는 중에도 검수자가
+        # 다시 불러오기/필터 적용을 누를 수 있음 - 그때마다 1번으로 되돌아가면 번거로우니
+        # 지금 보던 후보(candidateId)를 새 목록에서 다시 찾아 그 자리를 유지함.
+        current_candidate_id = self._current().candidateId if self._current() else None
         try:
             all_candidates = review.load_candidates(candidate_json_path)
             self._candidates = review.apply_filters(all_candidates, self.filter_input.text())
         except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
             self.status_label.setText(f"[오류] {exc}")
             return
-        self._index = 0
+        self._index = self._find_index_by_candidate_id(current_candidate_id)
         self.status_label.setText(f"{len(all_candidates)}개 중 {len(self._candidates)}개 표시 (필터 적용됨)")
         self.image_label.setFocus()
         self._refresh()
+
+    def _find_index_by_candidate_id(self, candidate_id: Optional[int]) -> int:
+        if candidate_id is not None:
+            for i, candidate in enumerate(self._candidates):
+                if candidate.candidateId == candidate_id:
+                    return i
+        return 0
 
     def _on_apply_filter_clicked(self) -> None:
         if not self.candidate_json_input.text().strip():
