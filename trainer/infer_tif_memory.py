@@ -526,7 +526,10 @@ def main():
     args.conf = get_float(options, "conf", 0.1)
     args.iou = get_float(options, "iou", 0.6)
     args.device = get_str(options, "device", "0")
-    half_option = get_bool(options, "half", True)
+    # ponytail: 기본 꺼짐 - 실사용(batch=8 정도)에서 오히려 더 느려진다는 보고가 있었음.
+    # FP16 이득은 배치가 텐서코어를 채울 만큼 커야 나오는데, 작은 배치에서는 fp32<->fp16
+    # 캐스팅 오버헤드가 이득보다 커짐. 배치를 크게 키운 뒤에만 half=1로 켜서 비교해볼 것.
+    half_option = get_bool(options, "half", False)
     args.max_det = get_int(options, "max_det", 300)
     args.edge_filter = get_bool(options, "edge_filter", True)
     args.edge_margin = get_int(options, "edge_margin", 32)
@@ -562,10 +565,10 @@ def main():
     from ultralytics import YOLO
     import torch
 
-    # ponytail: half=True는 CUDA에서만 지원됨(CPU에 쓰면 ultralytics가 에러 냄) - device가
-    # "auto"/"0"/"0,1"처럼 GPU를 가리켜도 실제 이 PC에 CUDA가 없으면(gpu_setup 미설치 등)
-    # torch.cuda.is_available()이 False라 자동으로 꺼짐. 기본 모델 FP32 대비 보통
-    # 1.3~2배 빠름(RTX 계열 텐서코어) - options에 half=0 주면 끌 수 있음(정확도 비교용 등).
+    # half=True는 CUDA에서만 지원됨(CPU에 쓰면 ultralytics가 에러 냄)이라 device가
+    # "auto"/"0"처럼 GPU를 가리켜도 실제 CUDA 없으면 자동으로 꺼짐. 기본은 꺼짐(half_option
+    # 기본값 False) - options에 half=1로 켜서 그 PC/배치 크기에서 실제로 더 빠른지 직접
+    # 재봐야 함(작은 배치에서는 오히려 느려질 수 있음, 위 half_option 주석 참고).
     args.half = half_option and str(args.device).lower() != "cpu" and torch.cuda.is_available()
 
     source_root = Path(args.source)
