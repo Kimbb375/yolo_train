@@ -392,7 +392,7 @@ def run_batch(model, tiles, meta, args, candidates, raw_path=None):
         device=None if str(args.device).lower() == "auto" else args.device,
         batch=len(tiles),
         max_det=args.max_det,
-        half=args.half,
+        quantize=16 if args.half else None,  # 이 ultralytics 버전은 half= 대신 quantize=(16=fp16) 씀
         save=False,
         save_txt=False,
         verbose=False,
