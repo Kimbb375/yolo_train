@@ -1015,7 +1015,9 @@ class InferenceTab(QWidget):
 
 
 class CandidateImageLabel(QLabel):
-    """후보 크롭 이미지 표시 영역. 클릭해서 포커스를 줘야 A/D/Space/X 키가 먹음(§알아둘 것)."""
+    """후보 크롭 이미지 표시 영역. 클릭해서 포커스를 줘야 A/D/Space/X 키가 먹음(§알아둘 것).
+    set_box()로 받은 박스(표시된 pixmap 픽셀 좌표)를 빨간 사각형으로 겹쳐 그림 - 저장된
+    후보 crop 이미지 자체엔 박스가 없고(원본 crop 그대로) 좌표만 따로 있어서 필요함."""
 
     def __init__(self) -> None:
         super().__init__("후보를 불러오세요.")
@@ -1023,10 +1025,31 @@ class CandidateImageLabel(QLabel):
         self.setMinimumSize(480, 480)
         self.setStyleSheet("background-color: #222; color: #ccc;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._box: Optional[tuple[float, float, float, float]] = None
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         self.setFocus()
         super().mousePressEvent(event)
+
+    def set_box(self, box: Optional[tuple[float, float, float, float]]) -> None:
+        self._box = box
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(event)
+        pixmap = self.pixmap()
+        if self._box is None or pixmap is None or pixmap.isNull():
+            return
+        offset_x = (self.width() - pixmap.width()) / 2.0
+        offset_y = (self.height() - pixmap.height()) / 2.0
+        left, top, right, bottom = self._box
+        rect = QRect(round(offset_x + left), round(offset_y + top),
+                     round(right - left), round(bottom - top))
+        painter = QPainter(self)
+        pen = QPen(QColor("red"))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.drawRect(rect)
 
 
 class ReviewTab(QWidget):
@@ -1206,16 +1229,29 @@ class ReviewTab(QWidget):
         candidate = self._current()
         if candidate is None:
             self.image_label.setText("표시할 후보가 없습니다.")
+            self.image_label.set_box(None)
             self.info_label.setText("-")
             return
 
         pixmap = QPixmap(candidate.candidateImagePath)
         if pixmap.isNull():
             self.image_label.setText(f"이미지를 불러올 수 없음: {candidate.candidateImagePath}")
+            self.image_label.set_box(None)
         else:
-            self.image_label.setPixmap(pixmap.scaled(
+            scaled = pixmap.scaled(
                 self.image_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+                Qt.TransformationMode.SmoothTransformation)
+            self.image_label.setPixmap(scaled)
+            crop = candidate.candidateCropBox
+            if crop.width > 0 and crop.height > 0:
+                box = candidate.globalBox
+                scale_x = scaled.width() / crop.width
+                scale_y = scaled.height() / crop.height
+                self.image_label.set_box((
+                    (box.left - crop.left) * scale_x, (box.top - crop.top) * scale_y,
+                    (box.right - crop.left) * scale_x, (box.bottom - crop.top) * scale_y))
+            else:
+                self.image_label.set_box(None)
 
         output_root = self._output_root()
         status = []
