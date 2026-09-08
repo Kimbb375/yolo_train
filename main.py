@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import itertools
 import os
 import re
 import socket
@@ -2374,17 +2375,26 @@ class SourceVerifyTab(QWidget):
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
 
+# 여러 RemoteBrowseDialog 인스턴스(같은 워커를 대상으로 폴더/모델/출력을 연달아 고를 때
+# 등)가 각자 0부터 requestId를 매기면, 서로 다른 다이얼로그의 요청이 같은 숫자로 겹쳐서
+# (컨트롤서버의 dir_result는 에이전트당 마지막 결과 하나만 들고 있음) 엉뚱한 결과가 매칭될
+# 여지가 있었음 - 프로세스 전체에서 공유하는 카운터로 바꿔서 항상 유일하게 만듦.
+_DIR_REQUEST_IDS = itertools.count(1)
+
+
 class RemoteBrowseDialog(QDialog):
     """원격 워커 PC의 파일시스템을 탐색해서 경로를 고르는 창. 원격 대상 선택 중엔 QFileDialog가
     중앙 PC 자신의 디스크만 보여줘서 "지정한 경로를 찾을 수 없음" 에러가 났음 - 실제로 그
     워커 PC에 list_dir 명령을 보내(기존 폴링 프로토콜 재사용) 받아온 목록을 보여줌. 폴링
-    주기(최대 몇 초)만큼 느리지만 새 프로토콜 없이 구현 가능해서 이 방식으로 함."""
+    주기만큼 느리지만 새 프로토콜 없이 구현 가능해서 이 방식으로 함. 주소창에 경로를 직접
+    타이핑해서 이동할 수도 있음(로컬 탐색기 주소창처럼) - 목록에 안 뜨는 UNC 경로(NAS 등,
+    예: \\\\nas\\share)도 워커 PC가 접근 가능하기만 하면 이렇게 바로 들어갈 수 있음."""
 
     def __init__(self, parent, server: "controlserver.ControlServer", agent_id: str,
                  pick_files: bool = False, file_suffix: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle(f"{agent_id}의 경로 선택")
-        self.resize(520, 420)
+        self.resize(560, 440)
         self._server = server
         self._agent_id = agent_id
         self._pick_files = pick_files
@@ -2393,8 +2403,11 @@ class RemoteBrowseDialog(QDialog):
         self._current_path = ""
         self._selected_path: Optional[str] = None
 
-        self.path_label = QLabel("(드라이브 목록)")
-        self.path_label.setWordWrap(True)
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText(r"경로 직접 입력(예: \\nas\share\폴더) 후 Enter 또는 이동")
+        self.path_input.returnPressed.connect(self._on_go_clicked)
+        go_button = QPushButton("이동")
+        go_button.clicked.connect(self._on_go_clicked)
         self.up_button = QPushButton("상위 폴더")
         self.up_button.clicked.connect(self._go_up)
         self.list_widget = QListWidget()
@@ -2407,7 +2420,8 @@ class RemoteBrowseDialog(QDialog):
 
         top_row = QHBoxLayout()
         top_row.addWidget(self.up_button)
-        top_row.addWidget(self.path_label, stretch=1)
+        top_row.addWidget(self.path_input, stretch=1)
+        top_row.addWidget(go_button)
         bottom_row = QHBoxLayout()
         bottom_row.addWidget(self.select_button)
         bottom_row.addWidget(cancel_button)
@@ -2426,12 +2440,15 @@ class RemoteBrowseDialog(QDialog):
     def selected_path(self) -> Optional[str]:
         return self._selected_path
 
+    def _on_go_clicked(self) -> None:
+        self._request_listing(self.path_input.text().strip())
+
     def _request_listing(self, path: str) -> None:
         self._current_path = path
-        self._request_id += 1
+        self._request_id = next(_DIR_REQUEST_IDS)
         self.status_label.setText("탐색 중...")
         self.list_widget.clear()
-        self.path_label.setText(path or "(드라이브 목록)")
+        self.path_input.setText(path)
         self._server.queue_command(self._agent_id, {
             "type": "list_dir", "requestId": self._request_id, "path": path})
         self._timer.start()

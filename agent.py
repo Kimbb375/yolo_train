@@ -28,7 +28,10 @@ import gpu_setup
 import inference
 import training
 
-POLL_INTERVAL_SECONDS = 2.0
+# ponytail: 2.0였다가 1.0으로 줄임 - 원격 경로 탐색(list_dir)이 이 주기 하나로 명령을 받고
+# 결과를 돌려보내는 구조라, 폴더 하나씩 클릭할 때마다 최대 이 값만큼 지연이 생겨 사용자가
+# "자주 끊긴다"고 느꼈음. LAN 안에서 JSON 몇 바이트 주고받는 정도라 1초로 줄여도 부담 적음.
+POLL_INTERVAL_SECONDS = 1.0
 
 
 def _post(server: str, token: str, path: str, payload: dict, timeout: float = 10.0) -> dict:
