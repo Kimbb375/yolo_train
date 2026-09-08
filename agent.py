@@ -43,7 +43,13 @@ def _post(server: str, token: str, path: str, payload: dict, timeout: float = 10
 
 class _TeeToServer(io.TextIOBase):
     """print() 출력을 실제 콘솔에도 남기고, 줄바꿈/1초 간격으로 모아 서버 /log 로도 올림.
-    inference.run()은 내부에서 print(flush=True)만 쓰므로 stdout 교체만으로 충분함."""
+    inference.run()은 내부에서 print(flush=True)만 쓰므로 stdout 교체만으로 충분함.
+
+    real_stdout이 None일 수 있음 - pythonw.exe(콘솔 없음)로 뜬 GUI 프로세스는 sys.stdout이
+    원래 None이고, "이 PC를 워커로 접속"으로 같은 프로세스 안에서 에이전트를 돌릴 때(아직
+    BackgroundCallWorker가 한 번도 sys.stdout을 바꿔치기 안 한 상태) 그 None을 그대로
+    캡처하게 됨 - None.write()를 부르면 죽으므로(사용자 보고: "'NoneType' object has no
+    attribute 'write'") None이면 그냥 건너뜀(콘솔에 echo만 못 할 뿐, 서버 로그 전송엔 지장 없음)."""
 
     def __init__(self, real_stdout, flush_callback) -> None:
         self._real = real_stdout
@@ -52,7 +58,8 @@ class _TeeToServer(io.TextIOBase):
         self._last_flush = 0.0
 
     def write(self, text: str) -> int:
-        self._real.write(text)
+        if self._real is not None:
+            self._real.write(text)
         self._buffer.append(text)
         now = time.time()
         if "\n" in text or (now - self._last_flush) > 1.0:
