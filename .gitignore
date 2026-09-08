@@ -12,3 +12,5 @@ wheels/
 
 # Runtime-generated (ultralytics config/font cache, created on first run)
 Ultralytics/
+trt_cache/
+user_settings.ini

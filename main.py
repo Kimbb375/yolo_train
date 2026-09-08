@@ -9,7 +9,7 @@ import sys
 import threading
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -75,6 +75,42 @@ def _looks_like_network_path(path: str) -> bool:
     아니라고 True/False로 정확히 판정할 순 없음(예: Z:\\ 같은 매핑된 네트워크 드라이브는
     UNC로 안 보여도 실제로는 공유임) - 그래서 안내 메시지 여부만 결정하는 용도로 씀."""
     return path.strip().startswith(("\\\\", "//"))
+
+
+# 앱 폴더 옆(빠른 업데이트가 app/* 전체를 덮어써도 목록에 없는 이 파일은 안 건드림)에 두는
+# 사용자 입력값 저장소. 레지스트리 대신 파일로 두는 이유는 포터블 배포(폴더째로 옮겨도
+# 그대로 동작해야 함)라 - QSettings 기본(레지스트리)은 그 PC를 벗어나면 안 따라옴.
+_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.ini")
+_SETTINGS = QSettings(_SETTINGS_PATH, QSettings.Format.IniFormat)
+
+
+def _auto_persist_paths(tab: QWidget) -> None:
+    """탭 안의 self.xxx_input 같은 "사용자가 직접 입력하는" QLineEdit/QPlainTextEdit를
+    전부 찾아서 값이 바뀔 때마다 저장하고, 다음 실행 때 그대로 복원함(사용자 요청: 경로를
+    앱을 껐다 켜도 다시 안 쳐도 되게). 각 탭 __init__을 일일이 안 건드리려고 vars()로
+    인스턴스 속성을 훑어서 위젯 타입만 보고 찾음 - summary_log 같은 읽기 전용(로그 출력용)
+    위젯은 isReadOnly()로 걸러져서 저장 대상에서 자동으로 빠짐."""
+    namespace = type(tab).__name__
+    # InferenceTab(6/6-1)의 source_input은 폴더 경로 텍스트일 수도, 다중 파일 선택 요약
+    # 문구("N번부터 총 M개 tif 선택됨")일 수도 있음 - 후자는 실제 파일 목록(self._selected_files,
+    # 휘발성)과 짝을 이뤄야 의미가 있어서 텍스트만 복원하면 그 요약 문구를 그대로 경로처럼
+    # 쓰려다 실패함. 이 필드만 복원 대상에서 뺌(폴더 경로만 쓰는 사람은 매번 다시 고르면 됨).
+    skip_names = {"source_input"} if isinstance(tab, InferenceTab) else set()
+    for name, widget in vars(tab).items():
+        if name in skip_names:
+            continue
+        if isinstance(widget, QLineEdit) and not widget.isReadOnly():
+            key = f"{namespace}/{name}"
+            saved = _SETTINGS.value(key, "")
+            if saved:
+                widget.setText(saved)
+            widget.textChanged.connect(lambda text, k=key: _SETTINGS.setValue(k, text))
+        elif isinstance(widget, QPlainTextEdit) and not widget.isReadOnly():
+            key = f"{namespace}/{name}"
+            saved = _SETTINGS.value(key, "")
+            if saved:
+                widget.setPlainText(saved)
+            widget.textChanged.connect(lambda k=key, w=widget: _SETTINGS.setValue(k, w.toPlainText()))
 
 
 class LabelDbTab(QWidget):
@@ -2659,19 +2695,24 @@ def main() -> int:
     window.setWindowTitle(f"Training Data Extractor (PySide6 pilot) - {version_label}")
 
     tabs = QTabWidget()
-    tabs.addTab(LabelDbTab(), "1. 라벨 DB")
-    tabs.addTab(SourceVerifyTab(), "2. 원본 검증")
-    tabs.addTab(CenterTileTab(), "2.2 중앙 크롭(보정용)")
-    tabs.addTab(TrainingTileTab(), "3. 학습 타일")
-    tabs.addTab(YoloOrganizeTab(), "4. YOLO 정렬")
-    tabs.addTab(TrainingTab(), "5. 학습")
-    tabs.addTab(InferenceTab(), "6. 원본 추론")
-    tabs.addTab(InferenceTestTab(), "6-1. 원본 추론 테스트(TensorRT)")
-    tabs.addTab(ReviewTab(), "7. 후보 검수")
-    tabs.addTab(CompareTab(), "8. 매칭/선별")
-    tabs.addTab(LabelSyncTab(), "9. TXT 보정 반영")
+    for widget, title in (
+        (LabelDbTab(), "1. 라벨 DB"),
+        (SourceVerifyTab(), "2. 원본 검증"),
+        (CenterTileTab(), "2.2 중앙 크롭(보정용)"),
+        (TrainingTileTab(), "3. 학습 타일"),
+        (YoloOrganizeTab(), "4. YOLO 정렬"),
+        (TrainingTab(), "5. 학습"),
+        (InferenceTab(), "6. 원본 추론"),
+        (InferenceTestTab(), "6-1. 원본 추론 테스트(TensorRT)"),
+        (ReviewTab(), "7. 후보 검수"),
+        (CompareTab(), "8. 매칭/선별"),
+        (LabelSyncTab(), "9. TXT 보정 반영"),
+    ):
+        _auto_persist_paths(widget)
+        tabs.addTab(widget, title)
 
     control_panel = ControlPanel()
+    _auto_persist_paths(control_panel)
     body_split = QSplitter(Qt.Orientation.Horizontal)
     body_split.addWidget(control_panel)
     body_split.addWidget(tabs)
