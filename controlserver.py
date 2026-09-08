@@ -217,7 +217,10 @@ class ControlServer:
                         self._send_json(200, {"ok": True})
                     elif self.path == "/poll":
                         server.heartbeat(data["agentId"], data.get("progress", ""))
-                        self._send_json(200, {"command": server.take_command(data["agentId"])})
+                        # 에이전트가 이미 작업 중이면(busy=True) 명령을 꺼내주지 않음 - 큐에서
+                        # 그냥 뽑아버리면(take_command) 처리 못 하고 유실됨. 계속 대기시킴.
+                        command = None if data.get("busy") else server.take_command(data["agentId"])
+                        self._send_json(200, {"command": command})
                     elif self.path == "/log":
                         server.append_log(data["agentId"], data.get("lines", []))
                         self._send_json(200, {"ok": True})

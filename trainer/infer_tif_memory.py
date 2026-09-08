@@ -553,19 +553,26 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     batch=32는 이 dynamic engine이 받을 수 있는 최대 배치 상한 - options의 batch가 32를
     넘으면 추론 시 에러남(현재 옵션 기본값은 8~16대라 문제 없음).
 
-    engine 캐시는 .pt 옆이 아니라 이 PC 로컬(ROOT/trt_cache)에 GPU 이름까지 넣어서 저장함 -
-    TensorRT engine은 만든 GPU 아키텍처에서만 동작하는데, 10번 중앙 제어로 여러 PC가 같은
-    네트워크 공유 .pt를 가리키는 경우 PC마다 GPU가 다를 수 있어서 그렇게 하지 않으면 다른
-    PC가 만든(호환 안 되는) engine을 잘못 집어쓰게 됨."""
+    engine 캐시는 .pt 옆이 아니라 이 PC 로컬에 GPU 이름까지 넣어서 저장함 - TensorRT
+    engine은 만든 GPU 아키텍처에서만 동작하는데, 10번 중앙 제어로 여러 PC가 같은 네트워크
+    공유 .pt를 가리키는 경우 PC마다 GPU가 다를 수 있어서 그렇게 하지 않으면 다른 PC가
+    만든(호환 안 되는) engine을 잘못 집어쓰게 됨.
+
+    %LOCALAPPDATA%(없으면 시스템 임시폴더) 밑에 둠 - ROOT(앱 설치 폴더) 자체가 워커 PC에서
+    네트워크 매핑 드라이브(예: Z 드라이브)에 설치돼 있는 경우가 있어서(사용자 사례), ROOT 밑에
+    두면 "로컬 캐시"가 실제로는 또 네트워크 경로가 되어 TensorRT가 멈추거나 매우 느려짐
+    (사용자 보고: TensorRT engine 빌드 단계에서 몇 분째 멈춘 것처럼 보임)."""
     import re as _re
+    import tempfile as _tempfile
     import torch as _torch
     gpu_name = _torch.cuda.get_device_name(0) if _torch.cuda.is_available() else "cpu"
     safe_gpu = _re.sub(r"[^A-Za-z0-9]+", "_", gpu_name).strip("_")
 
     pt = Path(pt_path)
     pt_stat = pt.stat()
-    cache_dir = ROOT / "trt_cache"
-    cache_dir.mkdir(exist_ok=True)
+    local_app_data = os.environ.get("LOCALAPPDATA") or _tempfile.gettempdir()
+    cache_dir = Path(local_app_data) / "TrainingDataExtractor" / "trt_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     engine_path = cache_dir / (
         f"{pt.stem}_{pt_stat.st_size}_{int(pt_stat.st_mtime)}"
         f"_imgsz{imgsz}_{'fp16' if half else 'fp32'}_{safe_gpu}.engine")
@@ -581,7 +588,6 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
 
     from ultralytics import YOLO as _YOLO
     import shutil as _shutil
-    import tempfile as _tempfile
     print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)
     # .pt가 NAS/UNC 공유 경로(\\server\share\...)에 있으면 ultralytics가 중간 산출물인
     # .onnx도 그 옆(같은 네트워크 경로)에 씀 - TensorRT의 onnx 로더가 UNC 경로나 특수/한글

@@ -148,9 +148,44 @@ def run_agent(server: str, token: str, agent_id: str,
         return
 
     log("[Agent] 등록 완료. 명령 대기 중...")
+
+    # ponytail: 예전엔 _run_job()을 이 폴링 루프 안에서 그대로(동기로) 불렀음 - 작업이
+    # 15초(ONLINE_TIMEOUT_SECONDS)보다 오래 걸리면(대부분의 추론/학습, 특히 TensorRT engine
+    # 빌드처럼 몇 분씩 걸리는 경우) 그 동안 /poll(하트비트)을 못 보내서 중앙 PC 목록에
+    # 빨간불(오프라인)로 잘못 뜸(사용자 보고: 작업 중인데 끊긴 것처럼 보임). 작업을 별도
+    # 스레드로 돌려서 폴링 루프는 항상 1초마다 하트비트를 계속 보내게 분리함.
+    busy_event = threading.Event()
+    job_started_at = [0.0]
+    liveness_stop = threading.Event()
+
+    def run_job_in_background(command: dict) -> None:
+        try:
+            _run_job(server, token, agent_id, command)
+        finally:
+            busy_event.clear()
+
+    def liveness_pinger() -> None:
+        # TensorRT engine 빌드처럼 네이티브 라이브러리가 오래 블로킹하면서 print()를 전혀
+        # 안 하는 구간이 있음 - 중앙 Summary 로그에 몇 분씩 새 줄이 안 뜨면 멈춘 것처럼
+        # 보임(사용자 보고). 10초마다 "아직 실행 중" 한 줄을 올려서 살아있음을 보여줌.
+        last_ping = 0.0
+        while not liveness_stop.is_set():
+            if busy_event.is_set() and time.time() - last_ping > 10:
+                elapsed = int(time.time() - job_started_at[0])
+                with contextlib.suppress(Exception):
+                    _post(server, token, "/log", {
+                        "agentId": agent_id,
+                        "lines": [f"[Agent] 작업 진행 중... (경과 {elapsed}초, 여전히 실행 중입니다)"]})
+                last_ping = time.time()
+            liveness_stop.wait(1.0)
+
+    threading.Thread(target=liveness_pinger, daemon=True).start()
+
     while not stop_event.is_set():
         try:
-            result = _post(server, token, "/poll", {"agentId": agent_id, "progress": ""})
+            progress = "작업 실행 중" if busy_event.is_set() else ""
+            result = _post(server, token, "/poll",
+                            {"agentId": agent_id, "progress": progress, "busy": busy_event.is_set()})
         except Exception as exc:  # noqa: BLE001 - 위와 같은 이유로 폭넓게 잡아서 재시도
             log(f"[Agent] 폴링 실패({exc})")
             stop_event.wait(POLL_INTERVAL_SECONDS)
@@ -160,9 +195,12 @@ def run_agent(server: str, token: str, agent_id: str,
         if command and command.get("type") in ("start_job", "start_training"):
             label = command.get("runName") or command.get("name") or "(자동 이름)"
             log(f"[Agent] 작업 수신: {label}")
-            _run_job(server, token, agent_id, command)
+            busy_event.set()
+            job_started_at[0] = time.time()
+            threading.Thread(target=run_job_in_background, args=(command,), daemon=True).start()
         stop_event.wait(POLL_INTERVAL_SECONDS)
 
+    liveness_stop.set()
     # 사용자가 명시적으로 접속 해제한 경우 - 중앙 PC가 15초 타임아웃까지 기다리지 않고
     # 바로 오프라인으로 표시할 수 있게 알려줌(사용자 보고: 해제해도 목록에 계속 초록불).
     with contextlib.suppress(Exception):
