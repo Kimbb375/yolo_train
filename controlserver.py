@@ -9,6 +9,7 @@ WebSocket 대비 트레이드오프지만 새 패키지 없이 되는 게 이득
 
 엔드포인트(전부 JSON, X-Control-Token 헤더로 인증):
   POST /register  {agentId, hostname, gpu}          최초 접속 등록
+  POST /unregister {agentId}                        명시적 접속 해제(즉시 오프라인 표시)
   POST /poll      {agentId, progress}                대기 중인 명령 하나 반환(없으면 null)
   POST /log       {agentId, lines: [...]}            진행 로그 append
   POST /done      {agentId, ok, message}             작업 종료 보고
@@ -118,6 +119,16 @@ class ControlServer:
             if progress:
                 state.progress = progress
 
+    def unregister(self, agent_id: str) -> None:
+        """워커가 "접속 해제"로 스스로 끊을 때 호출됨 - lastSeen을 0으로 눌러서 snapshot()의
+        online 판정(15초 타임아웃)을 기다릴 필요 없이 바로 오프라인으로 보이게 함
+        (사용자 보고: 접속 해제해도 PC 목록에 계속 초록불로 남아있음)."""
+        with self._lock:
+            state = self._agents.get(agent_id)
+            if state is not None:
+                state.lastSeen = 0.0
+                state.progress = "연결 해제됨"
+
     def append_log(self, agent_id: str, lines: list[str]) -> None:
         with self._lock:
             state = self._agents.get(agent_id)
@@ -215,6 +226,9 @@ class ControlServer:
                     data = self._read_json()
                     if self.path == "/register":
                         server.register(data["agentId"], data.get("hostname", ""), data.get("gpu", ""))
+                        self._send_json(200, {"ok": True})
+                    elif self.path == "/unregister":
+                        server.unregister(data["agentId"])
                         self._send_json(200, {"ok": True})
                     elif self.path == "/poll":
                         server.heartbeat(data["agentId"], data.get("progress", ""))

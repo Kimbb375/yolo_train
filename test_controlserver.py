@@ -27,6 +27,19 @@ def check_auth_and_register() -> None:
     print("OK: 토큰 인증 + 에이전트 등록/스냅샷 검증.")
 
 
+def check_unregister_marks_offline_immediately() -> None:
+    server = controlserver.ControlServer(token="secret")
+    server.register("pc1", "PC-ONE", "")
+    assert server.snapshot()["agents"][0]["online"]
+
+    server.unregister("pc1")
+    agent = server.snapshot()["agents"][0]
+    assert not agent["online"]
+    assert agent["progress"] == "연결 해제됨"
+
+    print("OK: unregister()가 15초 타임아웃을 안 기다리고 바로 오프라인으로 표시함 검증.")
+
+
 def check_command_queue_and_targeting() -> None:
     server = controlserver.ControlServer(token="secret")
     server.register("pc1", "PC-ONE", "")
@@ -97,6 +110,7 @@ def check_upload_extracts_and_blocks_zip_slip() -> None:
 
 if __name__ == "__main__":
     check_auth_and_register()
+    check_unregister_marks_offline_immediately()
     check_command_queue_and_targeting()
     check_log_and_done()
     check_upload_extracts_and_blocks_zip_slip()

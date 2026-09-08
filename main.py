@@ -2701,11 +2701,24 @@ class ControlPanel(QWidget):
 
         self._agent_thread = _AgentThread(server_url, token, agent_id)
         self._agent_thread.status_changed.connect(self.worker_status_label.setText)
+        self._agent_thread.finished.connect(self._on_agent_thread_finished)
         self._agent_thread.start()
         self.worker_connect_button.setText("접속 해제")
         self.worker_server_input.setEnabled(False)
         self.worker_token_input.setEnabled(False)
         self.worker_name_input.setEnabled(False)
+
+    def _on_agent_thread_finished(self) -> None:
+        # 정상 stop()이든 예상 못한 예외든, 스레드가 끝나면 항상 UI를 리셋해서 다음 클릭이
+        # 무조건 "새로 접속 시도"가 되게 함 - 안 그러면 죽은 스레드 참조가 남아서 사용자가
+        # 버튼을 눌러도 그 참조 정리만 하고 실제 재접속은 한 번 더 눌러야 되는 문제가 있었음
+        # (사용자 보고: "첫 등록 때 오류 뜨고 안 되다가 다시 접속하면 그때 됨").
+        if self._agent_thread is not None:
+            self._agent_thread = None
+            self.worker_connect_button.setText("중앙에 접속(이 PC를 워커로)")
+            self.worker_server_input.setEnabled(True)
+            self.worker_token_input.setEnabled(True)
+            self.worker_name_input.setEnabled(True)
 
     def _on_pc_clicked(self, item: QListWidgetItem) -> None:
         CONTROL_CONTEXT.set_target(item.data(Qt.ItemDataRole.UserRole))
@@ -2724,7 +2737,7 @@ class ControlPanel(QWidget):
         selected_row = 0
         selected_log: list[str] = []
         for row, agent in enumerate(agents, start=1):
-            dot = "🟢" if agent["online"] else "⚪"
+            dot = "🟢" if agent["online"] else "🔴"
             item = QListWidgetItem(f"{dot} {agent['agentId']} - {agent['progress'] or '대기'}")
             item.setData(Qt.ItemDataRole.UserRole, agent["agentId"])
             self.pc_list.addItem(item)

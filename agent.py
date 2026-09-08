@@ -162,7 +162,7 @@ def run_agent(server: str, token: str, agent_id: str,
             _post(server, token, "/register",
                   {"agentId": agent_id, "hostname": socket.gethostname(), "gpu": gpu_state})
             break
-        except (urllib.error.URLError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - URL 오타/서버가 아직 안 뜬 상태 등 뭐든 재시도
             log(f"[Agent] 서버 연결 실패({exc}), {POLL_INTERVAL_SECONDS}초 후 재시도...")
             stop_event.wait(POLL_INTERVAL_SECONDS)
     if stop_event.is_set():
@@ -172,7 +172,7 @@ def run_agent(server: str, token: str, agent_id: str,
     while not stop_event.is_set():
         try:
             result = _post(server, token, "/poll", {"agentId": agent_id, "progress": ""})
-        except (urllib.error.URLError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - 위와 같은 이유로 폭넓게 잡아서 재시도
             log(f"[Agent] 폴링 실패({exc})")
             stop_event.wait(POLL_INTERVAL_SECONDS)
             continue
@@ -185,6 +185,11 @@ def run_agent(server: str, token: str, agent_id: str,
             log(f"[Agent] 작업 수신: {label}")
             _run_job(server, token, agent_id, command)
         stop_event.wait(POLL_INTERVAL_SECONDS)
+
+    # 사용자가 명시적으로 접속 해제한 경우 - 중앙 PC가 15초 타임아웃까지 기다리지 않고
+    # 바로 오프라인으로 표시할 수 있게 알려줌(사용자 보고: 해제해도 목록에 계속 초록불).
+    with contextlib.suppress(Exception):
+        _post(server, token, "/unregister", {"agentId": agent_id})
     log("[Agent] 접속 해제됨.")
 
 
