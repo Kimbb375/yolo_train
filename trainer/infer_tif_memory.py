@@ -580,11 +580,20 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
         raise RuntimeError("TensorRT 관련 패키지 설치 실패")
 
     from ultralytics import YOLO as _YOLO
+    import shutil as _shutil
+    import tempfile as _tempfile
     print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)
-    exported = _YOLO(pt_path).export(format="engine", imgsz=imgsz, half=half, dynamic=True, batch=32, device=0)
-    exported_path = Path(exported)
-    if exported_path != engine_path:
-        exported_path.replace(engine_path)
+    # .pt가 NAS/UNC 공유 경로(\\server\share\...)에 있으면 ultralytics가 중간 산출물인
+    # .onnx도 그 옆(같은 네트워크 경로)에 씀 - TensorRT의 onnx 로더가 UNC 경로나 특수/한글
+    # 문자가 섞인 경로를 못 읽어서 "failed to load ONNX file" 로 실패하는 사례가 있었음
+    # (사용자 보고). .pt를 이 PC 로컬(trt_cache 밑 임시 폴더)로 먼저 복사해서 export 전체를
+    # 로컬 경로 안에서만 진행하면 이 문제를 근본적으로 피할 수 있음.
+    with _tempfile.TemporaryDirectory(dir=str(cache_dir)) as tmp_dir:
+        local_pt = Path(tmp_dir) / pt.name
+        _shutil.copyfile(pt_path, local_pt)
+        exported = _YOLO(str(local_pt)).export(
+            format="engine", imgsz=imgsz, half=half, dynamic=True, batch=32, device=0)
+        Path(exported).replace(engine_path)
     print(f"[TensorRT] engine 준비 완료: {engine_path}", flush=True)
     return str(engine_path)
 
