@@ -788,7 +788,9 @@ class TrainingTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 학습 명령 전송...")
-        path_flags = {"--dataset": "데이터셋", "--model": "초기 모델", "--project": "runs 출력 폴더"}
+        # runs 출력 폴더(--project)는 경고 대상에서 뺌 - 워커 로컬 디스크에 체크포인트를 쓰는
+        # 게 학습 중 계속 NAS에 쓰는 것보다 나음(중앙 저장 경로로 끝나고 한 번에 모으면 됨).
+        path_flags = {"--dataset": "데이터셋", "--model": "초기 모델"}
         for i, token in enumerate(args[:-1]):
             if token in path_flags and not _looks_like_network_path(args[i + 1]):
                 self._route_incoming(
@@ -1227,7 +1229,10 @@ class InferenceTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
-        for label, path in (("원본 TIF", source), ("모델", model_path), ("출력 폴더", output_root)):
+        # 출력 폴더는 경고 대상에서 뺌 - 워커 로컬 디스크에 쓰고 끝나면 한 번에 압축해서
+        # 중앙으로 올리는 게(중앙 저장 경로 + mirror) 오히려 권장 패턴임(매 파일 NAS 쓰기로
+        # 인한 부하를 피하려는 것). 원본/모델은 워커가 실제로 "읽어야" 하니 경고 유지.
+        for label, path in (("원본 TIF", source), ("모델", model_path)):
             if not _looks_like_network_path(path):
                 self._route_incoming(
                     agent_id, f"[안내] {label} 경로('{path}')가 \\\\로 시작하는 공유(NAS/UNC) "
