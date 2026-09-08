@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import socket
+import string
 import sys
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from typing import Optional
 
 import gpu_setup
 import inference
+import training
 
 POLL_INTERVAL_SECONDS = 2.0
 
@@ -83,7 +85,38 @@ def _upload_result(server: str, token: str, agent_id: str, run_root: str) -> Non
     print("[Agent] 업로드 완료.", flush=True)
 
 
+def _list_dir(path: str):
+    """중앙 PC가 이 워커 PC의 경로를 골라야 할 때(6번/5번 탭에서 원격 대상 선택 중
+    "찾기..." -> RemoteBrowseDialog) 씀. path가 비어있으면 윈도우 드라이브 목록을 줌."""
+    if not path:
+        drives = [f"{letter}:\\" for letter in string.ascii_uppercase if os.path.exists(f"{letter}:\\")]
+        return [{"name": d, "path": d, "isDir": True} for d in drives], None
+    try:
+        entries = []
+        with os.scandir(path) as it:
+            for item in it:
+                try:
+                    entries.append({"name": item.name, "path": item.path, "isDir": item.is_dir()})
+                except OSError:
+                    continue
+        entries.sort(key=lambda e: (not e["isDir"], e["name"].lower()))
+        return entries, None
+    except OSError as exc:
+        return [], str(exc)
+
+
+def _handle_list_dir(server: str, token: str, agent_id: str, command: dict) -> None:
+    path = command.get("path") or ""
+    entries, error = _list_dir(path)
+    with contextlib.suppress(Exception):
+        _post(server, token, "/dir_result", {
+            "agentId": agent_id, "requestId": command.get("requestId"),
+            "path": path, "entries": entries, "error": error})
+
+
 def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
+    """job type별로 실제 작업을 실행함. inference/training 둘 다 print()로 진행 상황을
+    내보내므로 stdout을 여기서 한 번만 가로채서(_TeeToServer) 서버 /log 로 올림."""
     def send_lines(text: str) -> None:
         lines = [ln for ln in text.split("\n") if ln]
         if lines:
@@ -93,20 +126,23 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
     real_stdout = sys.stdout
     sys.stdout = _TeeToServer(real_stdout, send_lines)
     ok, message = True, "완료"
-    result = None
     try:
-        result = inference.run(
-            command["source"], command["output"], command["model"],
-            command.get("runName"), command["options"])
-        message = result.to_display_text()
+        if command.get("type") == "start_training":
+            training.run(command["args"])
+            message = "학습 완료"
+        else:
+            result = inference.run(
+                command["source"], command["output"], command["model"],
+                command.get("runName"), command["options"])
+            message = result.to_display_text()
+            if command.get("mirror"):
+                try:
+                    _upload_result(server, token, agent_id, result.runRootPath)
+                except Exception as exc:  # noqa: BLE001 - 업로드 실패해도 추론 자체는 성공이라 계속 보고
+                    print(f"[Agent] 중앙 업로드 실패: {exc}", flush=True)
     except Exception as exc:  # noqa: BLE001 - 실패도 서버에 보고해야 다른 PC 결과와 취합 가능
         ok = False
         message = str(exc)
-    if ok and result is not None and command.get("mirror"):
-        try:
-            _upload_result(server, token, agent_id, result.runRootPath)
-        except Exception as exc:  # noqa: BLE001 - 업로드 실패해도 추론 자체는 성공이라 계속 보고
-            print(f"[Agent] 중앙 업로드 실패: {exc}", flush=True)
     sys.stdout.flush()
     sys.stdout = real_stdout
     with contextlib.suppress(Exception):
@@ -142,8 +178,11 @@ def run_agent(server: str, token: str, agent_id: str,
             continue
 
         command = result.get("command")
-        if command and command.get("type") == "start_job":
-            log(f"[Agent] 작업 수신: {command.get('runName') or '(자동 이름)'}")
+        if command and command.get("type") == "list_dir":
+            _handle_list_dir(server, token, agent_id, command)
+        elif command and command.get("type") in ("start_job", "start_training"):
+            label = command.get("runName") or command.get("name") or "(자동 이름)"
+            log(f"[Agent] 작업 수신: {label}")
             _run_job(server, token, agent_id, command)
         stop_event.wait(POLL_INTERVAL_SECONDS)
     log("[Agent] 접속 해제됨.")

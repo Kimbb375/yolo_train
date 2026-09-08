@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -560,6 +561,16 @@ class TrainingTab(QWidget):
         super().__init__()
         self._worker: BackgroundCallWorker | None = None
 
+        # 6번(원본 추론)과 같은 방식으로 왼쪽 ControlPanel에서 고른 PC에 학습을 원격
+        # 배포함(단, 멀티 노드 DDP는 노드마다 순번/마스터 IP를 직접 맞춰야 해서 원격 배포
+        # 대상에서 제외 - 각 참여 PC에서 로컬로 직접 실행하는 기존 방식 그대로 씀).
+        self._remote_agent_id: Optional[str] = None
+        self._states: dict[Optional[str], _JobView] = {}
+        self._active_remote_ids: set[str] = set()
+        self._poll_timer: Optional[QTimer] = None
+        self.target_label = QLabel()
+        CONTROL_CONTEXT.target_changed.connect(self._on_control_target_changed)
+
         self.dataset_input = QPlainTextEdit()
         self.dataset_input.setPlaceholderText("YOLO 데이터셋 폴더 (여러 개면 줄바꿈으로 구분)")
         self.dataset_input.setFixedHeight(60)
@@ -644,6 +655,7 @@ class TrainingTab(QWidget):
         build_row.addStretch(1)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self.target_label)
         layout.addLayout(form)
         layout.addLayout(param_row)
         layout.addLayout(aug_row)
@@ -651,25 +663,70 @@ class TrainingTab(QWidget):
         layout.addLayout(build_row)
         layout.addWidget(self.log, stretch=1)
 
+        self._on_control_target_changed(CONTROL_CONTEXT.selected_agent_id)
+
+    def _on_control_target_changed(self, agent_id: Optional[str]) -> None:
+        self._remote_agent_id = agent_id
+        if agent_id is None:
+            self.target_label.setText("제어 대상: 이 PC (로컬 실행)")
+        else:
+            self.target_label.setText(f"제어 대상: {agent_id} (원격 - 멀티 노드 DDP는 각 PC에서 로컬로 실행하세요)")
+        # 멀티 노드는 노드마다 이 PC 자신의 순번/마스터 IP로 직접 실행해야 해서 원격 배포
+        # 대상에서 제외함(네트워크 테스트도 마찬가지 이유).
+        self.multinode_checkbox.setEnabled(agent_id is None)
+        self.network_test_button.setEnabled(agent_id is None)
+        self._render_target(agent_id)
+
+    def _get_state(self, target_key: Optional[str]) -> _JobView:
+        return self._states.setdefault(target_key, _JobView())
+
+    def _render_target(self, target_key: Optional[str]) -> None:
+        state = self._get_state(target_key)
+        # 로컬은 원본 스트림을 조각(줄바꿈 안 끝난 것 포함) 그대로 이어붙인 것이라 구분자
+        # 없이 합침. 원격은 서버가 이미 줄 단위로 잘라 보내준 것이라 줄바꿈으로 합침.
+        text = "".join(state.summary) if target_key is None else "\n".join(state.summary)
+        self.log.setPlainText(text)
+        self.start_button.setEnabled(not state.running)
+
     @staticmethod
     def _browse_button(handler) -> QPushButton:
         button = QPushButton("찾기...")
         button.clicked.connect(handler)
         return button
 
+    def _browse_remote(self, pick_files: bool, file_suffix: str = "") -> Optional[str]:
+        """원격 대상 선택 중이면 그 워커 PC 경로를 탐색하는 창을 띄움 - 반환값이 None이 아니면
+        (빈 문자열 포함 취소 제외) 그 경로를 그대로 씀. 원격이 아니면 None(로컬 QFileDialog로)."""
+        if self._remote_agent_id is None:
+            return None
+        server = CONTROL_CONTEXT.server
+        if server is None:
+            return ""
+        dialog = RemoteBrowseDialog(self, server, self._remote_agent_id, pick_files, file_suffix)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
+            return dialog.selected_path()
+        return ""
+
     def _pick_dataset(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "YOLO 데이터셋 폴더 선택")
+        remote = self._browse_remote(pick_files=False)
+        path = remote if remote is not None else QFileDialog.getExistingDirectory(self, "YOLO 데이터셋 폴더 선택")
         if path:
             existing = self.dataset_input.toPlainText().strip()
             self.dataset_input.setPlainText((existing + "\n" + path).strip() if existing else path)
 
     def _pick_model(self) -> None:
+        remote = self._browse_remote(pick_files=True, file_suffix=".pt")
+        if remote is not None:
+            if remote:
+                self.model_input.setText(remote)
+            return
         path, _ = QFileDialog.getOpenFileName(self, "초기 모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
             self.model_input.setText(path)
 
     def _pick_project(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "runs 출력 폴더 선택")
+        remote = self._browse_remote(pick_files=False)
+        path = remote if remote is not None else QFileDialog.getExistingDirectory(self, "runs 출력 폴더 선택")
         if path:
             self.project_input.setText(path)
 
@@ -693,6 +750,9 @@ class TrainingTab(QWidget):
         if multinode and not self.master_addr_input.text().strip():
             self.log.setPlainText("[오류] 멀티 노드 마스터 노드 IP를 입력하세요.")
             return
+        if multinode and self._remote_agent_id is not None:
+            self.log.setPlainText("[오류] 멀티 노드 DDP는 원격 배포 대상이 아닙니다 - 이 PC(로컬)를 선택한 뒤 각 참여 PC에서 직접 실행하세요.")
+            return
 
         try:
             args = training.build_train_args(
@@ -703,9 +763,17 @@ class TrainingTab(QWidget):
             self.log.setPlainText(f"[오류] {exc}")
             return
 
-        self.log.setPlainText("학습 시작...\n")
-        self.start_button.setEnabled(False)
+        target_key = self._remote_agent_id
+        self._states[target_key] = _JobView()
+        self._states[target_key].running = True
         self.network_test_button.setEnabled(False)
+        self._render_target(target_key)
+
+        if target_key is not None:
+            self._start_remote_training(target_key, args)
+            return
+
+        self._route_incoming(None, "학습 시작...\n")
         if multinode:
             command = training.build_multinode_command(
                 args, self.node_count_input.value(), self.node_rank_input.value(),
@@ -713,41 +781,105 @@ class TrainingTab(QWidget):
             self._worker = BackgroundProcessWorker(command)
         else:
             self._worker = BackgroundCallWorker(training.run, args)
-        self._worker.output.connect(self._append_log)
+        self._worker.output.connect(lambda text: self._route_incoming(None, text))
         self._worker.finished_ok.connect(self._on_finished_ok)
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
+
+    def _start_remote_training(self, agent_id: str, args: list[str]) -> None:
+        server = CONTROL_CONTEXT.server
+        if server is None:
+            self._route_incoming(agent_id, "[오류] 서버가 꺼져 있습니다.")
+            self._get_state(agent_id).running = False
+            if agent_id == self._remote_agent_id:
+                self.start_button.setEnabled(True)
+            return
+
+        self._route_incoming(agent_id, f"[{agent_id}]로 원격 학습 명령 전송...")
+        server.queue_command(agent_id, {
+            "type": "start_training", "args": args, "name": self.name_input.text().strip() or "yolo_whale"})
+        self._active_remote_ids.add(agent_id)
+        if self._poll_timer is None:
+            self._poll_timer = QTimer(self)
+            self._poll_timer.setInterval(1000)
+            self._poll_timer.timeout.connect(self._poll_all_remote)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start()
+
+    def _poll_all_remote(self) -> None:
+        server = CONTROL_CONTEXT.server
+        if server is None or not self._active_remote_ids:
+            if self._poll_timer is not None:
+                self._poll_timer.stop()
+            return
+
+        agents_by_id = {a["agentId"]: a for a in server.snapshot()["agents"]}
+        finished_ids = []
+        for agent_id in list(self._active_remote_ids):
+            agent = agents_by_id.get(agent_id)
+            if agent is None:
+                continue
+            state = self._get_state(agent_id)
+            log_tail = agent["logTail"]
+            if state.log_seen > len(log_tail):
+                state.log_seen = 0
+            for line in log_tail[state.log_seen:]:
+                self._route_incoming(agent_id, line)
+            state.log_seen = len(log_tail)
+
+            if agent["currentJob"] is None and agent["progress"].startswith(("완료:", "실패:")):
+                self._route_incoming(agent_id, agent["progress"])
+                state.running = False
+                if agent_id == self._remote_agent_id:
+                    self.start_button.setEnabled(True)
+                    self.network_test_button.setEnabled(True)
+                finished_ids.append(agent_id)
+        for agent_id in finished_ids:
+            self._active_remote_ids.discard(agent_id)
+        if not self._active_remote_ids and self._poll_timer is not None:
+            self._poll_timer.stop()
+
+    def _route_incoming(self, target_key: Optional[str], text: str) -> None:
+        state = self._get_state(target_key)
+        state.summary.append(text)
+        if target_key != self._remote_agent_id:
+            return
+        if target_key is None:
+            self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+            self.log.insertPlainText(text)
+        else:
+            self.log.appendPlainText(text)
 
     def _on_network_test_clicked(self) -> None:
         if not self.master_addr_input.text().strip():
             self.log.setPlainText("[오류] 마스터 노드 IP를 입력하세요.")
             return
 
-        self.log.setPlainText("네트워크 테스트 시작 (양쪽 컴퓨터 다 눌러야 함)...\n")
+        self._route_incoming(None, "네트워크 테스트 시작 (양쪽 컴퓨터 다 눌러야 함)...\n")
         self.start_button.setEnabled(False)
         self.network_test_button.setEnabled(False)
         command = training.build_network_test_command(
             self.node_count_input.value(), self.node_rank_input.value(),
             self.master_addr_input.text().strip(), self.master_port_input.text().strip() or "29500")
         self._worker = BackgroundProcessWorker(command)
-        self._worker.output.connect(self._append_log)
+        self._worker.output.connect(lambda text: self._route_incoming(None, text))
         self._worker.finished_ok.connect(self._on_finished_ok)
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
 
-    def _append_log(self, text: str) -> None:
-        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
-        self.log.insertPlainText(text)
-
     def _on_finished_ok(self, _result) -> None:
-        self._append_log("\n[OK] 완료.\n")
-        self.start_button.setEnabled(True)
-        self.network_test_button.setEnabled(True)
+        self._route_incoming(None, "\n[OK] 완료.\n")
+        self._get_state(None).running = False
+        if self._remote_agent_id is None:
+            self.start_button.setEnabled(True)
+            self.network_test_button.setEnabled(True)
 
     def _on_finished_error(self, message: str) -> None:
-        self._append_log(f"\n[오류] {message}\n")
-        self.start_button.setEnabled(True)
-        self.network_test_button.setEnabled(True)
+        self._route_incoming(None, f"\n[오류] {message}\n")
+        self._get_state(None).running = False
+        if self._remote_agent_id is None:
+            self.start_button.setEnabled(True)
+            self.network_test_button.setEnabled(True)
 
 
 class _JobView:
@@ -924,13 +1056,36 @@ class InferenceTab(QWidget):
         button.clicked.connect(handler)
         return button
 
+    def _browse_remote(self, target_input: QLineEdit, pick_files: bool, file_suffix: str = "") -> bool:
+        """원격 대상 선택 중이면 그 워커 PC 경로를 탐색하는 창을 띄움 - 중앙 PC의
+        QFileDialog는 중앙 PC 자신의 디스크만 보여줘서 워커 경로 입력시 "지정된 경로를
+        찾을 수 없음" 에러가 났었음(사용자 보고). 반환값 True면 원격 처리로 대신함."""
+        if self._remote_agent_id is None:
+            return False
+        server = CONTROL_CONTEXT.server
+        if server is None:
+            return True
+        dialog = RemoteBrowseDialog(self, server, self._remote_agent_id, pick_files, file_suffix)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
+            target_input.setText(dialog.selected_path())
+        return True
+
     def _pick_source(self) -> None:
+        if self._browse_remote(self.source_input, pick_files=False):
+            self._selected_files = []
+            return
         path = QFileDialog.getExistingDirectory(self, "원본 TIF 폴더 선택")
         if path:
             self._selected_files = []
             self.source_input.setText(path)
 
     def _pick_source_files(self) -> None:
+        # 다중 파일 선택은 원격 다이얼로그가 지원 안 함(단일 항목만 고름) - 원격 대상일 땐
+        # 폴더 선택(_pick_source)으로 대신 지정하도록 안내.
+        if self._remote_agent_id is not None:
+            self.summary_log.appendPlainText(
+                "\n[안내] 원격 대상에서는 다중 파일 선택 대신 폴더 선택을 쓰세요.")
+            return
         paths, _ = QFileDialog.getOpenFileNames(
             self, "원본 TIF 파일 선택 (여러 개 가능)", "", "TIF images (*.tif *.tiff)")
         if not paths:
@@ -951,11 +1106,15 @@ class InferenceTab(QWidget):
         return f"{label}번부터 총 {len(names)}개 tif 선택됨"
 
     def _pick_model(self) -> None:
+        if self._browse_remote(self.model_input, pick_files=True, file_suffix=".pt"):
+            return
         path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
             self.model_input.setText(path)
 
     def _pick_output(self) -> None:
+        if self._browse_remote(self.output_input, pick_files=False):
+            return
         path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if path:
             self.output_input.setText(path)
@@ -2211,6 +2370,119 @@ class SourceVerifyTab(QWidget):
             self.status_label.setText(f"[오류] {exc}")
             return
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
+
+
+class RemoteBrowseDialog(QDialog):
+    """원격 워커 PC의 파일시스템을 탐색해서 경로를 고르는 창. 원격 대상 선택 중엔 QFileDialog가
+    중앙 PC 자신의 디스크만 보여줘서 "지정한 경로를 찾을 수 없음" 에러가 났음 - 실제로 그
+    워커 PC에 list_dir 명령을 보내(기존 폴링 프로토콜 재사용) 받아온 목록을 보여줌. 폴링
+    주기(최대 몇 초)만큼 느리지만 새 프로토콜 없이 구현 가능해서 이 방식으로 함."""
+
+    def __init__(self, parent, server: "controlserver.ControlServer", agent_id: str,
+                 pick_files: bool = False, file_suffix: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{agent_id}의 경로 선택")
+        self.resize(520, 420)
+        self._server = server
+        self._agent_id = agent_id
+        self._pick_files = pick_files
+        self._file_suffix = file_suffix.lower()
+        self._request_id = 0
+        self._current_path = ""
+        self._selected_path: Optional[str] = None
+
+        self.path_label = QLabel("(드라이브 목록)")
+        self.path_label.setWordWrap(True)
+        self.up_button = QPushButton("상위 폴더")
+        self.up_button.clicked.connect(self._go_up)
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.status_label = QLabel("")
+        self.select_button = QPushButton("파일 선택" if pick_files else "이 폴더 선택")
+        self.select_button.clicked.connect(self._on_select_clicked)
+        cancel_button = QPushButton("취소")
+        cancel_button.clicked.connect(self.reject)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(self.up_button)
+        top_row.addWidget(self.path_label, stretch=1)
+        bottom_row = QHBoxLayout()
+        bottom_row.addWidget(self.select_button)
+        bottom_row.addWidget(cancel_button)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top_row)
+        layout.addWidget(self.list_widget, stretch=1)
+        layout.addWidget(self.status_label)
+        layout.addLayout(bottom_row)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._poll_result)
+        self._request_listing("")
+
+    def selected_path(self) -> Optional[str]:
+        return self._selected_path
+
+    def _request_listing(self, path: str) -> None:
+        self._current_path = path
+        self._request_id += 1
+        self.status_label.setText("탐색 중...")
+        self.list_widget.clear()
+        self.path_label.setText(path or "(드라이브 목록)")
+        self._server.queue_command(self._agent_id, {
+            "type": "list_dir", "requestId": self._request_id, "path": path})
+        self._timer.start()
+
+    def _poll_result(self) -> None:
+        result = self._server.get_dir_result(self._agent_id)
+        if result is None or result.get("requestId") != self._request_id:
+            return
+        self._timer.stop()
+        if result.get("error"):
+            self.status_label.setText(f"[오류] {result['error']}")
+            return
+        self.status_label.setText("")
+        for entry in result.get("entries", []):
+            if not entry["isDir"]:
+                if not self._pick_files:
+                    continue
+                if self._file_suffix and not entry["name"].lower().endswith(self._file_suffix):
+                    continue
+            prefix = "\U0001F4C1 " if entry["isDir"] else "\U0001F4C4 "
+            item = QListWidgetItem(prefix + entry["name"])
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.list_widget.addItem(item)
+
+    def _go_up(self) -> None:
+        if not self._current_path:
+            return
+        trimmed = self._current_path.rstrip("\\/")
+        parent = os.path.dirname(trimmed)
+        self._request_listing(parent if parent and parent != trimmed else "")
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        if entry["isDir"]:
+            self._request_listing(entry["path"])
+        elif self._pick_files:
+            self._selected_path = entry["path"]
+            self.accept()
+
+    def _on_select_clicked(self) -> None:
+        if self._pick_files:
+            item = self.list_widget.currentItem()
+            if item is None:
+                self.status_label.setText("[오류] 파일을 선택하세요.")
+                return
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if entry["isDir"]:
+                self.status_label.setText("[오류] 파일을 선택하세요(폴더 아님).")
+                return
+            self._selected_path = entry["path"]
+        else:
+            self._selected_path = self._current_path
+        self.accept()
 
 
 class ControlContext(QObject):
