@@ -572,17 +572,12 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     if engine_path.is_file():
         return str(engine_path)
 
-    # ultralytics의 자체 자동설치(pip install, --break-system-packages 없음)는 uv가 관리하는
-    # 포터블 python에서 externally-managed-environment 에러로 항상 실패함 - 미리 우리가 설치.
-    import importlib
-    import subprocess
-    import sys
-    missing = [pkg for pkg, mod in (("onnx", "onnx"), ("onnxslim", "onnxslim"),
-                                     ("onnxruntime-gpu", "onnxruntime"), ("tensorrt", "tensorrt"))
-               if importlib.util.find_spec(mod) is None]
-    if missing:
-        print(f"[TensorRT] 필요 패키지 설치 중: {', '.join(missing)} (최초 1회, 수 분 소요)...", flush=True)
-        subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", *missing], check=True)
+    # 필요 패키지(onnx/onnxslim/onnxruntime-gpu/tensorrt) 설치 여부 확인/설치는 gpu_setup에
+    # 공용으로 둠 - main.py의 "TensorRT 설치" 버튼(모델을 안 돌려도 미리 설치 가능)과 이 자동
+    # 경로가 같은 로직/마커 파일을 공유함.
+    import gpu_setup
+    if not gpu_setup.ensure_tensorrt(log=lambda msg: print(msg, flush=True)):
+        raise RuntimeError("TensorRT 관련 패키지 설치 실패")
 
     from ultralytics import YOLO as _YOLO
     print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)

@@ -1,8 +1,10 @@
 import io
 import os
 import re
+import socket
 import subprocess
 import sys
+import threading
 from typing import Optional
 
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, QThread, QTimer, Signal
@@ -748,6 +750,21 @@ class TrainingTab(QWidget):
         self.network_test_button.setEnabled(True)
 
 
+class _JobView:
+    """InferenceTab이 제어 대상(로컬=None 또는 agent_id)별로 따로 들고 있는 로그/진행 상태.
+    PC를 바꿔 클릭해도 그 PC 걸로 시작한 작업의 로그/진행률이 섞이거나 사라지지 않게
+    분리해두는 용도(사용자 요청: "작업하는 프로세스는 선택하는 pc마다 다르게 표기")."""
+
+    def __init__(self) -> None:
+        self.summary: list[str] = []
+        self.load: list[str] = []
+        self.detail: list[str] = []
+        self.progress_value = 0
+        self.progress_max = 0
+        self.running = False
+        self.log_seen = 0  # 원격 전용: server의 logTail 중 어디까지 이미 반영했는지
+
+
 class InferenceTab(QWidget):
     """6. 원본 추론 — 원본 TIF -> 내부 타일링 -> YOLO 추론 -> candidates.json"""
 
@@ -755,14 +772,18 @@ class InferenceTab(QWidget):
         super().__init__()
         self._worker: BackgroundCallWorker | None = None
         self._gpu_worker: BackgroundCallWorker | None = None
+        self._tensorrt_worker: BackgroundCallWorker | None = None
         self._bench_worker: BackgroundCallWorker | None = None
         self._selected_files: list[str] = []
 
         # 왼쪽 ControlPanel에서 다른 PC를 클릭하면 이 탭이 그 PC를 원격으로 조작하는 모드로
         # 바뀜(로컬 BackgroundCallWorker 대신 controlserver에 명령을 큐잉하고 로그를 폴링함).
+        # PC별 로그/진행 상태는 _states에 따로 보관하고(None=로컬), 화면엔 그 중 현재 선택된
+        # 대상 것만 렌더링함 - 다른 PC를 보고 있어도 폴링 자체는 계속되어 진행이 안 멈춤.
         self._remote_agent_id: Optional[str] = None
-        self._remote_log_seen = 0
-        self._remote_timer: Optional[QTimer] = None
+        self._states: dict[Optional[str], _JobView] = {}
+        self._active_remote_ids: set[str] = set()
+        self._poll_timer: Optional[QTimer] = None
         self.target_label = QLabel()
         CONTROL_CONTEXT.target_changed.connect(self._on_control_target_changed)
 
@@ -770,6 +791,13 @@ class InferenceTab(QWidget):
         self.gpu_install_button = QPushButton("GPU torch 설치")
         self.gpu_install_button.clicked.connect(self._on_gpu_install_clicked)
         self._refresh_gpu_status()
+
+        # 6-1(TensorRT 테스트)에서 engine=1로 첫 실행할 때 자동 설치되긴 하지만, 모델을 굳이
+        # 돌리기 전에 미리 설치해두고 싶다는 요청 - GPU torch 설치 버튼과 같은 패턴.
+        self.tensorrt_status_label = QLabel()
+        self.tensorrt_install_button = QPushButton("TensorRT 설치")
+        self.tensorrt_install_button.clicked.connect(self._on_tensorrt_install_clicked)
+        self._refresh_tensorrt_status()
 
         self.optimize_button = QPushButton("최적 배치 검색")
         self.optimize_button.setToolTip(
@@ -842,6 +870,8 @@ class InferenceTab(QWidget):
         gpu_row = QHBoxLayout()
         gpu_row.addWidget(self.gpu_status_label)
         gpu_row.addWidget(self.gpu_install_button)
+        gpu_row.addWidget(self.tensorrt_status_label)
+        gpu_row.addWidget(self.tensorrt_install_button)
         gpu_row.addWidget(self.optimize_button)
         gpu_row.addStretch(1)
 
@@ -865,7 +895,21 @@ class InferenceTab(QWidget):
         # GPU 설치/배치 최적화는 이 PC의 로컬 하드웨어를 대상으로 하는 기능이라 원격 대상일
         # 때는 의미가 없음(잘못 이해하고 중앙 PC에서 눌러버리는 걸 막으려고 비활성화).
         self.gpu_install_button.setEnabled(agent_id is None)
+        self.tensorrt_install_button.setEnabled(agent_id is None)
         self.optimize_button.setEnabled(agent_id is None)
+        self._render_target(agent_id)
+
+    def _get_state(self, target_key: Optional[str]) -> _JobView:
+        return self._states.setdefault(target_key, _JobView())
+
+    def _render_target(self, target_key: Optional[str]) -> None:
+        state = self._get_state(target_key)
+        self.summary_log.setPlainText("\n".join(state.summary))
+        self.load_log.setPlainText("\n".join(state.load))
+        self.detail_log.setPlainText("\n".join(state.detail))
+        self.progress_bar.setMaximum(state.progress_max or 1)
+        self.progress_bar.setValue(state.progress_value)
+        self.start_button.setEnabled(not state.running)
 
     @staticmethod
     def _log_group(title: str, content: QPlainTextEdit) -> QGroupBox:
@@ -940,6 +984,30 @@ class InferenceTab(QWidget):
         self.gpu_install_button.setEnabled(True)
         self._refresh_gpu_status()
 
+    def _refresh_tensorrt_status(self) -> None:
+        state = gpu_setup.tensorrt_status()
+        text = {
+            "available": "TensorRT: 설치되어 있음 (사용 가능)",
+            "unavailable": "TensorRT: 이전 설치 시도 실패 - 재시도 가능",
+            "not_installed": "TensorRT: 설치 필요 (6-1에서 engine=1 쓰려면 먼저 설치하세요)",
+        }[state]
+        self.tensorrt_status_label.setText(text)
+        self.tensorrt_install_button.setVisible(state != "available")
+        self.tensorrt_install_button.setText("TensorRT 재설치 시도" if state == "unavailable" else "TensorRT 설치")
+
+    def _on_tensorrt_install_clicked(self) -> None:
+        self.tensorrt_install_button.setEnabled(False)
+        self.summary_log.appendPlainText("\nTensorRT 설치 시작...")
+        self._tensorrt_worker = BackgroundCallWorker(lambda: gpu_setup.ensure_tensorrt(force=True))
+        self._tensorrt_worker.output.connect(self._on_worker_output)
+        self._tensorrt_worker.finished_ok.connect(self._on_tensorrt_install_finished)
+        self._tensorrt_worker.finished_error.connect(self._on_tensorrt_install_finished)
+        self._tensorrt_worker.start()
+
+    def _on_tensorrt_install_finished(self, _result=None) -> None:
+        self.tensorrt_install_button.setEnabled(True)
+        self._refresh_tensorrt_status()
+
     @staticmethod
     def _get_option(options_text: str, key: str, default: str) -> str:
         for part in options_text.split(","):
@@ -995,17 +1063,17 @@ class InferenceTab(QWidget):
             self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
             return
 
-        for log in (self.summary_log, self.load_log, self.detail_log):
-            log.clear()
-        self.progress_bar.setValue(0)
+        target_key = self._remote_agent_id
+        self._states[target_key] = _JobView()
+        self._states[target_key].running = True
         self._line_buffer = ""
-        self.start_button.setEnabled(False)
+        self._render_target(target_key)  # 화면(현재 보고 있는 대상=target_key) 비우고 진행바 리셋
 
-        if self._remote_agent_id is not None:
-            self._start_remote(source, model_path, output_root)
+        if target_key is not None:
+            self._start_remote(target_key, source, model_path, output_root)
             return
 
-        self.summary_log.setPlainText("추론 시작...\n")
+        self._route_incoming(None, "추론 시작...")
         self._worker = BackgroundCallWorker(
             inference.run, source, output_root, model_path,
             self.name_input.text().strip() or None, self.options_input.text())
@@ -1014,81 +1082,111 @@ class InferenceTab(QWidget):
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
 
-    def _start_remote(self, source: str, model_path: str, output_root: str) -> None:
+    def _start_remote(self, agent_id: str, source: str, model_path: str, output_root: str) -> None:
         server = CONTROL_CONTEXT.server
-        agent_id = self._remote_agent_id
-        if server is None or agent_id is None:
-            self.summary_log.setPlainText("[오류] 서버가 꺼져 있습니다.")
-            self.start_button.setEnabled(True)
+        if server is None:
+            self._route_incoming(agent_id, "[오류] 서버가 꺼져 있습니다.")
+            self._get_state(agent_id).running = False
+            if agent_id == self._remote_agent_id:
+                self.start_button.setEnabled(True)
             return
 
-        self.summary_log.setPlainText(f"[{agent_id}]로 원격 추론 명령 전송...\n")
+        self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
         server.queue_command(agent_id, {
             "type": "start_job", "source": source, "model": model_path, "output": output_root,
             "runName": self.name_input.text().strip() or None, "options": self.options_input.text(),
             "mirror": bool(CONTROL_CONTEXT.central_output_root),
         })
-        self._remote_log_seen = 0
-        if self._remote_timer is None:
-            self._remote_timer = QTimer(self)
-            self._remote_timer.setInterval(1000)
-            self._remote_timer.timeout.connect(self._poll_remote)
-        self._remote_timer.start()
+        self._active_remote_ids.add(agent_id)
+        if self._poll_timer is None:
+            self._poll_timer = QTimer(self)
+            self._poll_timer.setInterval(1000)
+            self._poll_timer.timeout.connect(self._poll_all_remote)
+        if not self._poll_timer.isActive():
+            self._poll_timer.start()
 
-    def _poll_remote(self) -> None:
+    def _poll_all_remote(self) -> None:
         server = CONTROL_CONTEXT.server
-        agent_id = self._remote_agent_id
-        if server is None or agent_id is None:
-            self._remote_timer.stop()
-            self.start_button.setEnabled(True)
+        if server is None or not self._active_remote_ids:
+            if self._poll_timer is not None:
+                self._poll_timer.stop()
             return
 
-        agent = next((a for a in server.snapshot()["agents"] if a["agentId"] == agent_id), None)
-        if agent is None:
-            return
-        log_tail = agent["logTail"]
-        if self._remote_log_seen > len(log_tail):
-            self._remote_log_seen = 0  # 서버가 오래된 로그를 정리함(500줄 상한) - 처음부터 다시 표시
-        for line in log_tail[self._remote_log_seen:]:
-            self._route_line(line)
-        self._remote_log_seen = len(log_tail)
+        agents_by_id = {a["agentId"]: a for a in server.snapshot()["agents"]}
+        finished_ids = []
+        for agent_id in list(self._active_remote_ids):
+            agent = agents_by_id.get(agent_id)
+            if agent is None:
+                continue
+            state = self._get_state(agent_id)
+            log_tail = agent["logTail"]
+            if state.log_seen > len(log_tail):
+                state.log_seen = 0  # 서버가 오래된 로그를 정리함(500줄 상한) - 처음부터 다시 표시
+            for line in log_tail[state.log_seen:]:
+                self._route_incoming(agent_id, line)
+            state.log_seen = len(log_tail)
 
-        if agent["currentJob"] is None and agent["progress"].startswith(("완료:", "실패:")):
-            self._remote_timer.stop()
-            self.summary_log.appendPlainText("\n" + agent["progress"])
-            self.start_button.setEnabled(True)
+            if agent["currentJob"] is None and agent["progress"].startswith(("완료:", "실패:")):
+                self._route_incoming(agent_id, agent["progress"])
+                state.running = False
+                if agent_id == self._remote_agent_id:
+                    self.start_button.setEnabled(True)
+                finished_ids.append(agent_id)
+        for agent_id in finished_ids:
+            self._active_remote_ids.discard(agent_id)
+        if not self._active_remote_ids and self._poll_timer is not None:
+            self._poll_timer.stop()
 
     def _on_worker_output(self, text: str) -> None:
         # print()는 라인 조각 단위로 여러 번 emit되므로 줄바꿈 기준으로 모아서 줄 단위로 분류함.
         self._line_buffer += text
         while "\n" in self._line_buffer:
             line, self._line_buffer = self._line_buffer.split("\n", 1)
-            self._route_line(line)
+            self._route_incoming(None, line)
 
-    def _route_line(self, line: str) -> None:
-        self._log_target_for(line).appendPlainText(line)
+    def _route_incoming(self, target_key: Optional[str], line: str) -> None:
+        """target_key(로컬=None/원격=agent_id)의 로그 버퍼에 항상 쌓고, 지금 화면에 보이는
+        대상과 같을 때만 위젯에도 바로 반영함 - 다른 PC를 보고 있을 땐 조용히 버퍼에만
+        쌓였다가, 그 PC로 다시 전환하면 _render_target이 한꺼번에 그려줌."""
+        state = self._get_state(target_key)
+        category = self._log_category_for(line)
+        getattr(state, category).append(line)
         match = re.search(r"\[FILE PROGRESS\] (\d+)/(\d+)", line)
         if match:
             total = int(match.group(2))
             if total > 0:
-                self.progress_bar.setMaximum(total)
-                self.progress_bar.setValue(min(int(match.group(1)), total))
+                state.progress_max = total
+                state.progress_value = min(int(match.group(1)), total)
 
-    def _log_target_for(self, line: str) -> QPlainTextEdit:
+        if target_key == self._remote_agent_id:
+            self._log_widget_for(category).appendPlainText(line)
+            if match and state.progress_max > 0:
+                self.progress_bar.setMaximum(state.progress_max)
+                self.progress_bar.setValue(state.progress_value)
+
+    @staticmethod
+    def _log_category_for(line: str) -> str:
         # C# InferenceTilingRunner의 IsTifLoadLog/IsTifDetailLog 분류 규칙 그대로 포팅.
         if line.startswith("Prefetch loading ") or (line.startswith("Processing ") and " loaded_in=" in line):
-            return self.load_log
+            return "load"
         if ": processed " in line or line.startswith("Saved intermediate candidates:"):
-            return self.detail_log
-        return self.summary_log
+            return "detail"
+        return "summary"
+
+    def _log_widget_for(self, category: str) -> QPlainTextEdit:
+        return {"load": self.load_log, "detail": self.detail_log, "summary": self.summary_log}[category]
 
     def _on_finished_ok(self, result) -> None:
-        self.summary_log.appendPlainText("\n" + result.to_display_text())
-        self.start_button.setEnabled(True)
+        self._route_incoming(None, result.to_display_text())
+        self._get_state(None).running = False
+        if self._remote_agent_id is None:
+            self.start_button.setEnabled(True)
 
     def _on_finished_error(self, message: str) -> None:
-        self.summary_log.appendPlainText(f"\n[오류] {message}")
-        self.start_button.setEnabled(True)
+        self._route_incoming(None, f"[오류] {message}")
+        self._get_state(None).running = False
+        if self._remote_agent_id is None:
+            self.start_button.setEnabled(True)
 
 
 class InferenceTestTab(InferenceTab):
@@ -2136,6 +2234,32 @@ class ControlContext(QObject):
 CONTROL_CONTEXT = ControlContext()
 
 
+class _AgentThread(QThread):
+    """agent.py의 run_agent()를 GUI 프로세스 안에서 돌리는 QThread. 워커 PC도 이 앱을
+    그대로 켜두고 왼쪽 패널에서 중앙 PC 주소만 입력하면 접속되게 하려는 것 - 예전처럼
+    별도로 --agent 커맨드라인을 띄울 필요 없음(그 방식도 여전히 됨, agent.py는 안 바뀜)."""
+
+    status_changed = Signal(str)
+
+    def __init__(self, server: str, token: str, agent_id: str) -> None:
+        super().__init__()
+        self._server = server
+        self._token = token
+        self._agent_id = agent_id
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        import agent as agent_module
+        try:
+            agent_module.run_agent(self._server, self._token, self._agent_id,
+                                    stop_event=self._stop_event, log=self.status_changed.emit)
+        except Exception as exc:  # noqa: BLE001 - 접속 스레드 죽는 대신 상태 라벨에 표시
+            self.status_changed.emit(f"[오류] {exc}")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
 class ControlPanel(QWidget):
     """왼쪽 고정 패널 - 중앙 서버 시작 + agent.py로 접속한 워커 PC 목록. 목록에서 PC를
     클릭하면 CONTROL_CONTEXT가 바뀌고, 6번(원본 추론) 탭이 그 PC를 원격으로 제어하는 모드로
@@ -2145,6 +2269,18 @@ class ControlPanel(QWidget):
         super().__init__()
         self.setMinimumWidth(230)
         self.setMaximumWidth(340)
+        self._agent_thread: Optional[_AgentThread] = None
+
+        self.worker_server_input = QLineEdit()
+        self.worker_server_input.setPlaceholderText("중앙 PC 주소, 예: http://192.168.0.10:8765")
+        self.worker_token_input = QLineEdit()
+        self.worker_token_input.setPlaceholderText("중앙 PC와 같은 토큰")
+        self.worker_name_input = QLineEdit()
+        self.worker_name_input.setPlaceholderText("비우면 이 PC 호스트명 사용")
+        self.worker_connect_button = QPushButton("중앙에 접속(이 PC를 워커로)")
+        self.worker_connect_button.clicked.connect(self._on_worker_connect_clicked)
+        self.worker_status_label = QLabel("연결 안 됨")
+        self.worker_status_label.setWordWrap(True)
 
         self.port_input = QLineEdit("8765")
         self.token_input = QLineEdit()
@@ -2171,6 +2307,12 @@ class ControlPanel(QWidget):
         central_output_row.addWidget(central_output_button)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>이 PC를 워커로 쓰기</b>"))
+        layout.addWidget(self.worker_server_input)
+        layout.addWidget(self.worker_token_input)
+        layout.addWidget(self.worker_name_input)
+        layout.addWidget(self.worker_connect_button)
+        layout.addWidget(self.worker_status_label)
         layout.addWidget(QLabel("<b>중앙 제어</b>"))
         layout.addWidget(QLabel("포트"))
         layout.addWidget(self.port_input)
@@ -2243,6 +2385,33 @@ class ControlPanel(QWidget):
         self.port_input.setEnabled(False)
         self.token_input.setEnabled(False)
         self._timer.start()
+
+    def _on_worker_connect_clicked(self) -> None:
+        if self._agent_thread is not None:
+            self._agent_thread.stop()
+            self._agent_thread.wait(3000)
+            self._agent_thread = None
+            self.worker_status_label.setText("연결 안 됨")
+            self.worker_connect_button.setText("중앙에 접속(이 PC를 워커로)")
+            self.worker_server_input.setEnabled(True)
+            self.worker_token_input.setEnabled(True)
+            self.worker_name_input.setEnabled(True)
+            return
+
+        server_url = self.worker_server_input.text().strip()
+        token = self.worker_token_input.text().strip()
+        if not server_url or not token:
+            self.worker_status_label.setText("[오류] 중앙 PC 주소와 토큰을 입력하세요.")
+            return
+        agent_id = self.worker_name_input.text().strip() or socket.gethostname()
+
+        self._agent_thread = _AgentThread(server_url, token, agent_id)
+        self._agent_thread.status_changed.connect(self.worker_status_label.setText)
+        self._agent_thread.start()
+        self.worker_connect_button.setText("접속 해제")
+        self.worker_server_input.setEnabled(False)
+        self.worker_token_input.setEnabled(False)
+        self.worker_name_input.setEnabled(False)
 
     def _on_pc_clicked(self, item: QListWidgetItem) -> None:
         CONTROL_CONTEXT.set_target(item.data(Qt.ItemDataRole.UserRole))

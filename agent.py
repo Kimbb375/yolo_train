@@ -16,10 +16,12 @@ import shutil
 import socket
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 import gpu_setup
 import inference
@@ -111,32 +113,40 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
         _post(server, token, "/done", {"agentId": agent_id, "ok": ok, "message": message})
 
 
-def run_agent(server: str, token: str, agent_id: str) -> None:
-    print(f"[Agent] {agent_id} -> {server} 접속 시도...")
+def run_agent(server: str, token: str, agent_id: str,
+              stop_event: Optional[threading.Event] = None, log=print) -> None:
+    """워커 루프 본체. CLI(--agent)에서도, main.py의 ControlPanel(GUI에서 "이 PC를 워커로
+    접속" 버튼 -> QThread)에서도 이 함수 하나를 그대로 씀 - stop_event로 그만둘 수 있고,
+    log 콜백으로 print 대신 GUI 쪽에 상태를 보낼 수 있음(기본값은 CLI 그대로 동작)."""
+    stop_event = stop_event or threading.Event()
+    log(f"[Agent] {agent_id} -> {server} 접속 시도...")
     gpu_state = gpu_setup.status()
-    while True:
+    while not stop_event.is_set():
         try:
             _post(server, token, "/register",
                   {"agentId": agent_id, "hostname": socket.gethostname(), "gpu": gpu_state})
             break
         except (urllib.error.URLError, OSError) as exc:
-            print(f"[Agent] 서버 연결 실패({exc}), {POLL_INTERVAL_SECONDS}초 후 재시도...")
-            time.sleep(POLL_INTERVAL_SECONDS)
+            log(f"[Agent] 서버 연결 실패({exc}), {POLL_INTERVAL_SECONDS}초 후 재시도...")
+            stop_event.wait(POLL_INTERVAL_SECONDS)
+    if stop_event.is_set():
+        return
 
-    print("[Agent] 등록 완료. 명령 대기 중...")
-    while True:
+    log("[Agent] 등록 완료. 명령 대기 중...")
+    while not stop_event.is_set():
         try:
             result = _post(server, token, "/poll", {"agentId": agent_id, "progress": ""})
         except (urllib.error.URLError, OSError) as exc:
-            print(f"[Agent] 폴링 실패({exc})")
-            time.sleep(POLL_INTERVAL_SECONDS)
+            log(f"[Agent] 폴링 실패({exc})")
+            stop_event.wait(POLL_INTERVAL_SECONDS)
             continue
 
         command = result.get("command")
         if command and command.get("type") == "start_job":
-            print(f"[Agent] 작업 수신: {command.get('runName') or '(자동 이름)'}")
+            log(f"[Agent] 작업 수신: {command.get('runName') or '(자동 이름)'}")
             _run_job(server, token, agent_id, command)
-        time.sleep(POLL_INTERVAL_SECONDS)
+        stop_event.wait(POLL_INTERVAL_SECONDS)
+    log("[Agent] 접속 해제됨.")
 
 
 def main() -> None:

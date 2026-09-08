@@ -14,6 +14,7 @@ python/ 폴더도 같은 방식 - cu121 torch를 미리 설치해둔 포터블 �
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -24,6 +25,10 @@ import appversion
 TORCH_VERSION = "2.13.0+cu126"
 TORCHVISION_VERSION = "0.28.0+cu126"
 INDEX_URL = "https://download.pytorch.org/whl/cu126"
+
+# pip 패키지명 -> import 모듈명 (onnxruntime-gpu는 import 시 onnxruntime).
+_TENSORRT_PACKAGES = {"onnx": "onnx", "onnxslim": "onnxslim",
+                      "onnxruntime-gpu": "onnxruntime", "tensorrt": "tensorrt"}
 
 
 def _marker_path() -> str:
@@ -104,3 +109,70 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
     log("[GPU] 설치 완료. 앱을 재시작해야 GPU가 적용됩니다." if ok else
         "[GPU] 설치가 실패했습니다. 위 로그를 확인하세요.")
     return False
+
+
+def _tensorrt_marker_path() -> str:
+    return os.path.join(os.path.dirname(sys.executable), "_tensorrt_attempted.json")
+
+
+def _tensorrt_missing_packages() -> list[str]:
+    return [pkg for pkg, module in _TENSORRT_PACKAGES.items() if importlib.util.find_spec(module) is None]
+
+
+def _tensorrt_already_attempted() -> bool:
+    marker = _tensorrt_marker_path()
+    if not os.path.isfile(marker):
+        return False
+    try:
+        with open(marker, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:  # noqa: BLE001 - 마커 파일 손상 시 재시도
+        return False
+    return data.get("installed") is True
+
+
+def tensorrt_status() -> str:
+    """"available": onnx/onnxslim/onnxruntime-gpu/tensorrt 전부 설치되어 6-1번 TensorRT
+    engine 변환이 바로 가능. "unavailable": 설치를 시도했지만 실패로 끝남(재시도 가능).
+    "not_installed": 아직 설치 안 함."""
+    if not _tensorrt_missing_packages():
+        return "available"
+    if _tensorrt_already_attempted():
+        return "unavailable"
+    return "not_installed"
+
+
+def ensure_tensorrt(log=print, force: bool = False) -> bool:
+    """TensorRT engine 변환에 필요한 패키지들을 미리 설치. GPU torch(cu126)와 달리 이번
+    프로세스가 아직 import한 적 없는 모듈들이라 설치 성공하면 재시작 없이 바로 쓸 수 있음
+    (ultralytics의 자체 자동설치는 --break-system-packages 없이 pip을 불러서 uv가 관리하는
+    포터블 python에서 항상 externally-managed-environment로 실패하기 때문에 직접 설치함)."""
+    missing = _tensorrt_missing_packages()
+    if not missing:
+        return True
+
+    if not force and _tensorrt_already_attempted():
+        log("[TensorRT] 이전에 설치를 시도했지만 실패했습니다. 네트워크 상태를 확인하고 다시 시도하세요.")
+        return False
+
+    log(f"[TensorRT] 설치 시작: {', '.join(missing)} (수 분 소요될 수 있음)...")
+    ok = False
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", *missing],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in process.stdout:
+            log("[TensorRT] " + line.rstrip())
+        ok = process.wait() == 0
+    except Exception as exc:  # noqa: BLE001 - 설치 실패는 .pt 폴백으로 처리
+        log(f"[TensorRT] 설치 실패: {exc}")
+
+    try:
+        with open(_tensorrt_marker_path(), "w", encoding="utf-8") as fh:
+            json.dump({"installed": ok}, fh)
+    except OSError:
+        pass
+
+    log("[TensorRT] 설치 완료. 바로 사용할 수 있습니다." if ok else
+        "[TensorRT] 설치가 실패했습니다. 위 로그를 확인하세요.")
+    return ok
