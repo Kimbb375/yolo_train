@@ -70,6 +70,13 @@ AUGMENTATION_PRESETS = {
 }
 
 
+def _looks_like_network_path(path: str) -> bool:
+    """원격 PC로 작업을 보낼 때 쓰는 경로가 UNC(\\\\서버\\공유\\...) 형태인지 대충 확인함 -
+    아니라고 True/False로 정확히 판정할 순 없음(예: Z:\\ 같은 매핑된 네트워크 드라이브는
+    UNC로 안 보여도 실제로는 공유임) - 그래서 안내 메시지 여부만 결정하는 용도로 씀."""
+    return path.strip().startswith(("\\\\", "//"))
+
+
 class LabelDbTab(QWidget):
     """1. 라벨 DB — YOLO 라벨+타일 이미지 -> object_db.json"""
 
@@ -781,6 +788,13 @@ class TrainingTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 학습 명령 전송...")
+        path_flags = {"--dataset": "데이터셋", "--model": "초기 모델", "--project": "runs 출력 폴더"}
+        for i, token in enumerate(args[:-1]):
+            if token in path_flags and not _looks_like_network_path(args[i + 1]):
+                self._route_incoming(
+                    agent_id, f"[안내] {path_flags[token]} 경로('{args[i + 1]}')가 \\\\로 시작하는 "
+                    "공유(NAS/UNC) 경로가 아닙니다 - 이 PC에만 있는 로컬 경로면 워커 PC에서 못 "
+                    "찾습니다(WinError 3). 두 PC가 같이 보는 공유 폴더 경로를 쓰세요.")
         server.queue_command(agent_id, {
             "type": "start_training", "args": args, "name": self.name_input.text().strip() or "yolo_whale"})
         self._active_remote_ids.add(agent_id)
@@ -1213,6 +1227,12 @@ class InferenceTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
+        for label, path in (("원본 TIF", source), ("모델", model_path), ("출력 폴더", output_root)):
+            if not _looks_like_network_path(path):
+                self._route_incoming(
+                    agent_id, f"[안내] {label} 경로('{path}')가 \\\\로 시작하는 공유(NAS/UNC) "
+                    "경로가 아닙니다 - 이 PC에만 있는 로컬 경로면 워커 PC에서 못 찾습니다 "
+                    "(WinError 3). 두 PC가 같이 보는 공유 폴더 경로를 쓰세요.")
         server.queue_command(agent_id, {
             "type": "start_job", "source": source, "model": model_path, "output": output_root,
             "runName": self.name_input.text().strip() or None, "options": self.options_input.text(),
