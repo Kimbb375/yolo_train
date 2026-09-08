@@ -5,7 +5,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,6 +38,7 @@ import json
 import batchbench
 import centertile
 import compare
+import controlserver
 import gpu_setup
 import inference
 import labelsync
@@ -2041,6 +2042,212 @@ class SourceVerifyTab(QWidget):
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
 
+class ControlTab(QWidget):
+    """10. 중앙 제어 — 이 PC를 중앙 서버로 띄우고, agent.py로 접속해온 워커 PC들에게 6번
+    원본 추론 작업을 원격으로 분배/모니터링함 (controlserver.py 참고, stdlib http.server 기반).
+    선택한 에이전트가 여러 대면 num_shards/shard 옵션을 자동으로 나눠 붙여줌(이미 있는
+    trainer/infer_tif_memory.py의 다중 GPU/PC 샤딩 기능을 그대로 재사용)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._server: Optional[controlserver.ControlServer] = None
+        self._selected_agent_id: Optional[str] = None
+
+        self.port_input = QLineEdit("8765")
+        self.token_input = QLineEdit()
+        self.token_input.setPlaceholderText("워커 PC와 공유할 임의의 비밀 문자열 (예: whale-2026)")
+        self.server_toggle_button = QPushButton("서버 시작")
+        self.server_toggle_button.clicked.connect(self._on_toggle_server)
+        self.server_status_label = QLabel("서버 꺼짐")
+
+        server_row = QHBoxLayout()
+        server_row.addWidget(QLabel("포트"))
+        server_row.addWidget(self.port_input)
+        server_row.addWidget(QLabel("토큰"))
+        server_row.addWidget(self.token_input, stretch=1)
+        server_row.addWidget(self.server_toggle_button)
+        server_row.addWidget(self.server_status_label)
+
+        self.agent_table = QTableWidget(0, 4)
+        self.agent_table.setHorizontalHeaderLabels(["에이전트", "GPU", "상태", "진행"])
+        self.agent_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.agent_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.agent_table.itemSelectionChanged.connect(self._on_agent_selected)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+
+        self.source_input = QLineEdit()
+        self.model_input = QLineEdit()
+        self.output_input = QLineEdit()
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("비워두면 매번 새 폴더(시간 기준)")
+        self.options_input = QLineEdit(
+            "tile_mode=memory, resume=1, tile=640, overlap=0.2, conf=0.1, iou=0.6, imgsz=640, batch=auto, "
+            "device=0, max_det=300, merge_iou=0.5, candidate_crop=640, candidate_context=120, candidate_view=tile")
+        self.target_combo = QComboBox()
+        self.target_combo.addItem("전체 에이전트(자동 샤딩)", "all")
+
+        form = QGridLayout()
+        form.addWidget(QLabel("원본 TIF 폴더"), 0, 0)
+        form.addWidget(self.source_input, 0, 1)
+        form.addWidget(self._browse_button(self._pick_source), 0, 2)
+        form.addWidget(QLabel("모델 pt"), 1, 0)
+        form.addWidget(self.model_input, 1, 1)
+        form.addWidget(self._browse_button(self._pick_model), 1, 2)
+        form.addWidget(QLabel("출력 폴더"), 2, 0)
+        form.addWidget(self.output_input, 2, 1)
+        form.addWidget(self._browse_button(self._pick_output), 2, 2)
+        form.addWidget(QLabel("실행 이름"), 3, 0)
+        form.addWidget(self.name_input, 3, 1)
+        form.addWidget(QLabel("대상"), 4, 0)
+        form.addWidget(self.target_combo, 4, 1)
+
+        options_row = QHBoxLayout()
+        options_row.addWidget(QLabel("옵션"))
+        options_row.addWidget(self.options_input, stretch=1)
+
+        self.dispatch_button = QPushButton("선택 대상에 작업 배포")
+        self.dispatch_button.clicked.connect(self._on_dispatch_clicked)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(server_row)
+        layout.addWidget(QLabel("워커 PC 목록 (agent.py로 접속한 PC들, 15초 이상 응답 없으면 오프라인 표시)"))
+        layout.addWidget(self.agent_table)
+        layout.addLayout(form)
+        layout.addLayout(options_row)
+        layout.addWidget(self.dispatch_button)
+        layout.addWidget(QLabel("선택한 에이전트 로그"))
+        layout.addWidget(self.log_view, stretch=1)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._refresh)
+
+    @staticmethod
+    def _browse_button(handler) -> QPushButton:
+        button = QPushButton("찾기...")
+        button.clicked.connect(handler)
+        return button
+
+    def _pick_source(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "원본 TIF 폴더 선택")
+        if path:
+            self.source_input.setText(path)
+
+    def _pick_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
+        if path:
+            self.model_input.setText(path)
+
+    def _pick_output(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
+        if path:
+            self.output_input.setText(path)
+
+    def _on_toggle_server(self) -> None:
+        if self._server is not None:
+            self._server.stop()
+            self._server = None
+            self._timer.stop()
+            self.server_status_label.setText("서버 꺼짐")
+            self.server_toggle_button.setText("서버 시작")
+            self.port_input.setEnabled(True)
+            self.token_input.setEnabled(True)
+            return
+
+        token = self.token_input.text().strip()
+        if not token:
+            self.server_status_label.setText("[오류] 토큰을 먼저 입력하세요.")
+            return
+        try:
+            port = int(self.port_input.text().strip())
+        except ValueError:
+            self.server_status_label.setText("[오류] 포트는 숫자여야 합니다.")
+            return
+
+        self._server = controlserver.ControlServer(token)
+        try:
+            self._server.start(port)
+        except OSError as exc:
+            self.server_status_label.setText(f"[오류] 서버 시작 실패: {exc}")
+            self._server = None
+            return
+        self.server_status_label.setText(f"서버 켜짐 (포트 {port}) - 워커 PC에서 agent.py로 이 PC IP에 접속하면 됨")
+        self.server_toggle_button.setText("서버 중지")
+        self.port_input.setEnabled(False)
+        self.token_input.setEnabled(False)
+        self._timer.start()
+
+    def _on_agent_selected(self) -> None:
+        rows = self.agent_table.selectionModel().selectedRows()
+        self._selected_agent_id = self.agent_table.item(rows[0].row(), 0).text() if rows else None
+
+    def _refresh(self) -> None:
+        if self._server is None:
+            return
+        snapshot = self._server.snapshot()
+        agents = snapshot["agents"]
+
+        previous_targets = {self.target_combo.itemData(i) for i in range(self.target_combo.count())}
+        current_ids = {a["agentId"] for a in agents}
+        if current_ids - {t for t in previous_targets if t != "all"}:
+            self.target_combo.clear()
+            self.target_combo.addItem("전체 에이전트(자동 샤딩)", "all")
+            for agent_id in sorted(current_ids):
+                self.target_combo.addItem(agent_id, agent_id)
+
+        self.agent_table.setRowCount(len(agents))
+        selected_log_tail: list[str] = []
+        for row, agent in enumerate(agents):
+            status = "온라인" if agent["online"] else "오프라인(응답 없음)"
+            self.agent_table.setItem(row, 0, QTableWidgetItem(agent["agentId"]))
+            self.agent_table.setItem(row, 1, QTableWidgetItem(agent["gpu"]))
+            self.agent_table.setItem(row, 2, QTableWidgetItem(status))
+            self.agent_table.setItem(row, 3, QTableWidgetItem(agent["progress"]))
+            if agent["agentId"] == self._selected_agent_id:
+                selected_log_tail = agent["logTail"]
+        if self._selected_agent_id is not None:
+            self.log_view.setPlainText("\n".join(selected_log_tail))
+            scrollbar = self.log_view.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _on_dispatch_clicked(self) -> None:
+        if self._server is None:
+            self.server_status_label.setText("[오류] 서버를 먼저 시작하세요.")
+            return
+        source = self.source_input.text().strip()
+        model_path = self.model_input.text().strip()
+        output_root = self.output_input.text().strip()
+        if not source or not model_path or not output_root:
+            self.server_status_label.setText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
+            return
+
+        target = self.target_combo.currentData()
+        agents = self._server.snapshot()["agents"]
+        run_name = self.name_input.text().strip() or None
+        options_text = self.options_input.text()
+
+        if target == "all":
+            targets = [a["agentId"] for a in agents if a["online"]]
+            if not targets:
+                self.server_status_label.setText("[오류] 온라인 에이전트가 없습니다.")
+                return
+            for shard_index, agent_id in enumerate(sorted(targets)):
+                shard_options = options_text
+                if len(targets) > 1:
+                    shard_options += f", num_shards={len(targets)}, shard={shard_index}"
+                self._server.queue_command(agent_id, {
+                    "type": "start_job", "source": source, "model": model_path,
+                    "output": output_root, "runName": run_name, "options": shard_options})
+            self.server_status_label.setText(f"{len(targets)}대 에이전트에 작업 배포함 (자동 샤딩).")
+        else:
+            self._server.queue_command(target, {
+                "type": "start_job", "source": source, "model": model_path,
+                "output": output_root, "runName": run_name, "options": options_text})
+            self.server_status_label.setText(f"{target}에 작업 배포함.")
+
+
 class UpdateBanner(QWidget):
     """업데이트 알림 배너 — 새 버전 있을 때만 나타남(없으면 높이 0, 자리 안 차지).
     의존성 변경 없는 버전이면 "빠른 업데이트" 버튼으로 소스만 받아 덮어쓸 수 있음
@@ -2086,6 +2293,7 @@ def main() -> int:
     tabs.addTab(ReviewTab(), "7. 후보 검수")
     tabs.addTab(CompareTab(), "8. 매칭/선별")
     tabs.addTab(LabelSyncTab(), "9. TXT 보정 반영")
+    tabs.addTab(ControlTab(), "10. 중앙 제어")
 
     banner = UpdateBanner()
     central = QWidget()
@@ -2122,4 +2330,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if "--agent" in sys.argv:
+        # 워커 PC용 헤드리스 모드 (10번 탭에서 띄운 중앙 서버로 접속). GUI/QApplication 없음.
+        sys.argv.remove("--agent")
+        import agent
+        agent.main()
+    else:
+        sys.exit(main())

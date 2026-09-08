@@ -1,0 +1,67 @@
+"""controlserver.ControlServer 핵심 로직(인증/명령 큐/샤딩 대상/스냅샷) 검증.
+실제 소켓은 안 열고(포트 충돌 없이 반복 실행 가능) 순수 상태 로직만 확인함.
+
+python test_controlserver.py 로 직접 실행.
+"""
+
+import controlserver
+
+
+def check_auth_and_register() -> None:
+    server = controlserver.ControlServer(token="secret")
+    assert server.check_token("secret")
+    assert not server.check_token("wrong")
+    assert not server.check_token(None)
+
+    server.register("pc1", "PC-ONE", "RTX A4500")
+    snapshot = server.snapshot()
+    assert len(snapshot["agents"]) == 1
+    assert snapshot["agents"][0]["agentId"] == "pc1"
+    assert snapshot["agents"][0]["online"]
+
+    print("OK: 토큰 인증 + 에이전트 등록/스냅샷 검증.")
+
+
+def check_command_queue_and_targeting() -> None:
+    server = controlserver.ControlServer(token="secret")
+    server.register("pc1", "PC-ONE", "")
+    server.register("pc2", "PC-TWO", "")
+
+    assert server.take_command("pc1") is None  # 큐 비었을 때 None
+
+    server.queue_command("pc1", {"type": "start_job", "source": "x"})
+    command = server.take_command("pc1")
+    assert command is not None and command["type"] == "start_job"
+    assert server.take_command("pc1") is None  # 한 번 꺼내면 소비됨
+
+    server.queue_command("all", {"type": "start_job", "source": "y"})
+    assert server.take_command("pc1")["source"] == "y"
+    assert server.take_command("pc2")["source"] == "y"
+
+    print("OK: 명령 큐(단건 소비) + all 대상 브로드캐스트 검증.")
+
+
+def check_log_and_done() -> None:
+    server = controlserver.ControlServer(token="secret")
+    server.register("pc1", "PC-ONE", "")
+    server.queue_command("pc1", {"type": "start_job"})
+
+    server.append_log("pc1", ["line1", "line2"])
+    snapshot = server.snapshot()
+    agent = snapshot["agents"][0]
+    assert agent["logTail"] == ["line1", "line2"]
+    assert agent["currentJob"] is not None
+
+    server.mark_done("pc1", True, "완료됨")
+    snapshot = server.snapshot()
+    agent = snapshot["agents"][0]
+    assert agent["currentJob"] is None
+    assert agent["progress"] == "완료: 완료됨"
+
+    print("OK: 로그 append + 작업 완료 처리(currentJob 초기화) 검증.")
+
+
+if __name__ == "__main__":
+    check_auth_and_register()
+    check_command_queue_and_targeting()
+    check_log_and_done()
