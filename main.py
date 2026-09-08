@@ -2380,11 +2380,31 @@ class ControlPanel(QWidget):
             return
         server.set_mirror_root(self.central_output_input.text().strip())
         CONTROL_CONTEXT.server = server
-        self.server_status_label.setText(f"서버 켜짐 (포트 {port}) - 워커 PC에서 agent.py로 이 PC IP:{port}에 접속")
+        local_ip = self._local_lan_ip()
+        self.server_status_label.setText(f"서버 켜짐 ({local_ip}:{port}) - 워커 PC 쪽 주소/토큰란에 그대로 넣으면 됨")
         self.server_toggle_button.setText("서버 중지")
         self.port_input.setEnabled(False)
         self.token_input.setEnabled(False)
+        # 이 PC 스스로도 워커로 붙일 수 있게(예: 중앙 PC에 GPU가 있는 경우), 그리고 다른
+        # 물리 PC에 알려줄 주소/토큰을 따로 찾아 적을 필요 없게 워커란에 바로 채워줌.
+        self.worker_server_input.setText(f"http://{local_ip}:{port}")
+        self.worker_token_input.setText(token)
         self._timer.start()
+
+    @staticmethod
+    def _local_lan_ip() -> str:
+        # 실제 패킷은 안 보내고 소켓에 목적지만 지정해서 OS가 고르는 아웃바운드 인터페이스의
+        # IP를 얻는 표준적인 방법 - 사내망 IP(예: 192.168.x.x)를 안내문에 그대로 쓰기 위함.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.5)
+                sock.connect(("8.8.8.8", 80))
+                return sock.getsockname()[0]
+        except OSError:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except OSError:
+                return "127.0.0.1"
 
     def _on_worker_connect_clicked(self) -> None:
         if self._agent_thread is not None:
