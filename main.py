@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import itertools
 import os
 import re
 import socket
@@ -17,7 +16,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -697,39 +695,23 @@ class TrainingTab(QWidget):
         button.clicked.connect(handler)
         return button
 
-    def _browse_remote(self, pick_files: bool, file_suffix: str = "") -> Optional[str]:
-        """원격 대상 선택 중이면 그 워커 PC 경로를 탐색하는 창을 띄움 - 반환값이 None이 아니면
-        (빈 문자열 포함 취소 제외) 그 경로를 그대로 씀. 원격이 아니면 None(로컬 QFileDialog로)."""
-        if self._remote_agent_id is None:
-            return None
-        server = CONTROL_CONTEXT.server
-        if server is None:
-            return ""
-        dialog = RemoteBrowseDialog(self, server, self._remote_agent_id, pick_files, file_suffix)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
-            return dialog.selected_path()
-        return ""
-
     def _pick_dataset(self) -> None:
-        remote = self._browse_remote(pick_files=False)
-        path = remote if remote is not None else QFileDialog.getExistingDirectory(self, "YOLO 데이터셋 폴더 선택")
+        # ponytail: 원격 대상용 커스텀 경로 탐색기(list_dir 폴링)를 시도했다가 연결이
+        # 불안정해서 뺐음 - 소스/모델/출력 경로는 대체로 NAS 등 여러 PC가 같이 보는 공유
+        # 폴더라, 이 중앙 PC의 표준 탐색기로 고른 경로(예: \\nas\share\...)를 그대로 워커에
+        # 보내는 게 훨씬 단순하고 잘 됨(사용자 요청).
+        path = QFileDialog.getExistingDirectory(self, "YOLO 데이터셋 폴더 선택")
         if path:
             existing = self.dataset_input.toPlainText().strip()
             self.dataset_input.setPlainText((existing + "\n" + path).strip() if existing else path)
 
     def _pick_model(self) -> None:
-        remote = self._browse_remote(pick_files=True, file_suffix=".pt")
-        if remote is not None:
-            if remote:
-                self.model_input.setText(remote)
-            return
         path, _ = QFileDialog.getOpenFileName(self, "초기 모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
             self.model_input.setText(path)
 
     def _pick_project(self) -> None:
-        remote = self._browse_remote(pick_files=False)
-        path = remote if remote is not None else QFileDialog.getExistingDirectory(self, "runs 출력 폴더 선택")
+        path = QFileDialog.getExistingDirectory(self, "runs 출력 폴더 선택")
         if path:
             self.project_input.setText(path)
 
@@ -1059,36 +1041,17 @@ class InferenceTab(QWidget):
         button.clicked.connect(handler)
         return button
 
-    def _browse_remote(self, target_input: QLineEdit, pick_files: bool, file_suffix: str = "") -> bool:
-        """원격 대상 선택 중이면 그 워커 PC 경로를 탐색하는 창을 띄움 - 중앙 PC의
-        QFileDialog는 중앙 PC 자신의 디스크만 보여줘서 워커 경로 입력시 "지정된 경로를
-        찾을 수 없음" 에러가 났었음(사용자 보고). 반환값 True면 원격 처리로 대신함."""
-        if self._remote_agent_id is None:
-            return False
-        server = CONTROL_CONTEXT.server
-        if server is None:
-            return True
-        dialog = RemoteBrowseDialog(self, server, self._remote_agent_id, pick_files, file_suffix)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path():
-            target_input.setText(dialog.selected_path())
-        return True
-
     def _pick_source(self) -> None:
-        if self._browse_remote(self.source_input, pick_files=False):
-            self._selected_files = []
-            return
+        # ponytail: 원격 대상용 커스텀 경로 탐색기(list_dir 폴링)를 시도했다가 연결이
+        # 불안정해서 뺐음 - 소스/모델/출력 경로는 대체로 NAS 등 여러 PC가 같이 보는 공유
+        # 폴더라, 이 중앙 PC의 표준 탐색기로 고른 경로(예: \\nas\share\...)를 그대로 워커에
+        # 보내는 게 훨씬 단순하고 잘 됨(사용자 요청).
         path = QFileDialog.getExistingDirectory(self, "원본 TIF 폴더 선택")
         if path:
             self._selected_files = []
             self.source_input.setText(path)
 
     def _pick_source_files(self) -> None:
-        # 다중 파일 선택은 원격 다이얼로그가 지원 안 함(단일 항목만 고름) - 원격 대상일 땐
-        # 폴더 선택(_pick_source)으로 대신 지정하도록 안내.
-        if self._remote_agent_id is not None:
-            self.summary_log.appendPlainText(
-                "\n[안내] 원격 대상에서는 다중 파일 선택 대신 폴더 선택을 쓰세요.")
-            return
         paths, _ = QFileDialog.getOpenFileNames(
             self, "원본 TIF 파일 선택 (여러 개 가능)", "", "TIF images (*.tif *.tiff)")
         if not paths:
@@ -1109,15 +1072,11 @@ class InferenceTab(QWidget):
         return f"{label}번부터 총 {len(names)}개 tif 선택됨"
 
     def _pick_model(self) -> None:
-        if self._browse_remote(self.model_input, pick_files=True, file_suffix=".pt"):
-            return
         path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
             self.model_input.setText(path)
 
     def _pick_output(self) -> None:
-        if self._browse_remote(self.output_input, pick_files=False):
-            return
         path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if path:
             self.output_input.setText(path)
@@ -2374,134 +2333,6 @@ class SourceVerifyTab(QWidget):
             return
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
-
-# 여러 RemoteBrowseDialog 인스턴스(같은 워커를 대상으로 폴더/모델/출력을 연달아 고를 때
-# 등)가 각자 0부터 requestId를 매기면, 서로 다른 다이얼로그의 요청이 같은 숫자로 겹쳐서
-# (컨트롤서버의 dir_result는 에이전트당 마지막 결과 하나만 들고 있음) 엉뚱한 결과가 매칭될
-# 여지가 있었음 - 프로세스 전체에서 공유하는 카운터로 바꿔서 항상 유일하게 만듦.
-_DIR_REQUEST_IDS = itertools.count(1)
-
-
-class RemoteBrowseDialog(QDialog):
-    """원격 워커 PC의 파일시스템을 탐색해서 경로를 고르는 창. 원격 대상 선택 중엔 QFileDialog가
-    중앙 PC 자신의 디스크만 보여줘서 "지정한 경로를 찾을 수 없음" 에러가 났음 - 실제로 그
-    워커 PC에 list_dir 명령을 보내(기존 폴링 프로토콜 재사용) 받아온 목록을 보여줌. 폴링
-    주기만큼 느리지만 새 프로토콜 없이 구현 가능해서 이 방식으로 함. 주소창에 경로를 직접
-    타이핑해서 이동할 수도 있음(로컬 탐색기 주소창처럼) - 목록에 안 뜨는 UNC 경로(NAS 등,
-    예: \\\\nas\\share)도 워커 PC가 접근 가능하기만 하면 이렇게 바로 들어갈 수 있음."""
-
-    def __init__(self, parent, server: "controlserver.ControlServer", agent_id: str,
-                 pick_files: bool = False, file_suffix: str = "") -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"{agent_id}의 경로 선택")
-        self.resize(560, 440)
-        self._server = server
-        self._agent_id = agent_id
-        self._pick_files = pick_files
-        self._file_suffix = file_suffix.lower()
-        self._request_id = 0
-        self._current_path = ""
-        self._selected_path: Optional[str] = None
-
-        self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText(r"경로 직접 입력(예: \\nas\share\폴더) 후 Enter 또는 이동")
-        self.path_input.returnPressed.connect(self._on_go_clicked)
-        go_button = QPushButton("이동")
-        go_button.clicked.connect(self._on_go_clicked)
-        self.up_button = QPushButton("상위 폴더")
-        self.up_button.clicked.connect(self._go_up)
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self.status_label = QLabel("")
-        self.select_button = QPushButton("파일 선택" if pick_files else "이 폴더 선택")
-        self.select_button.clicked.connect(self._on_select_clicked)
-        cancel_button = QPushButton("취소")
-        cancel_button.clicked.connect(self.reject)
-
-        top_row = QHBoxLayout()
-        top_row.addWidget(self.up_button)
-        top_row.addWidget(self.path_input, stretch=1)
-        top_row.addWidget(go_button)
-        bottom_row = QHBoxLayout()
-        bottom_row.addWidget(self.select_button)
-        bottom_row.addWidget(cancel_button)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(top_row)
-        layout.addWidget(self.list_widget, stretch=1)
-        layout.addWidget(self.status_label)
-        layout.addLayout(bottom_row)
-
-        self._timer = QTimer(self)
-        self._timer.setInterval(500)
-        self._timer.timeout.connect(self._poll_result)
-        self._request_listing("")
-
-    def selected_path(self) -> Optional[str]:
-        return self._selected_path
-
-    def _on_go_clicked(self) -> None:
-        self._request_listing(self.path_input.text().strip())
-
-    def _request_listing(self, path: str) -> None:
-        self._current_path = path
-        self._request_id = next(_DIR_REQUEST_IDS)
-        self.status_label.setText("탐색 중...")
-        self.list_widget.clear()
-        self.path_input.setText(path)
-        self._server.queue_command(self._agent_id, {
-            "type": "list_dir", "requestId": self._request_id, "path": path})
-        self._timer.start()
-
-    def _poll_result(self) -> None:
-        result = self._server.get_dir_result(self._agent_id)
-        if result is None or result.get("requestId") != self._request_id:
-            return
-        self._timer.stop()
-        if result.get("error"):
-            self.status_label.setText(f"[오류] {result['error']}")
-            return
-        self.status_label.setText("")
-        for entry in result.get("entries", []):
-            if not entry["isDir"]:
-                if not self._pick_files:
-                    continue
-                if self._file_suffix and not entry["name"].lower().endswith(self._file_suffix):
-                    continue
-            prefix = "\U0001F4C1 " if entry["isDir"] else "\U0001F4C4 "
-            item = QListWidgetItem(prefix + entry["name"])
-            item.setData(Qt.ItemDataRole.UserRole, entry)
-            self.list_widget.addItem(item)
-
-    def _go_up(self) -> None:
-        if not self._current_path:
-            return
-        trimmed = self._current_path.rstrip("\\/")
-        parent = os.path.dirname(trimmed)
-        self._request_listing(parent if parent and parent != trimmed else "")
-
-    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
-        entry = item.data(Qt.ItemDataRole.UserRole)
-        if entry["isDir"]:
-            self._request_listing(entry["path"])
-        elif self._pick_files:
-            self._selected_path = entry["path"]
-            self.accept()
-
-    def _on_select_clicked(self) -> None:
-        if self._pick_files:
-            item = self.list_widget.currentItem()
-            if item is None:
-                self.status_label.setText("[오류] 파일을 선택하세요.")
-                return
-            entry = item.data(Qt.ItemDataRole.UserRole)
-            if entry["isDir"]:
-                self.status_label.setText("[오류] 파일을 선택하세요(폴더 아님).")
-                return
-            self._selected_path = entry["path"]
-        else:
-            self._selected_path = self._current_path
-        self.accept()
 
 
 class ControlContext(QObject):

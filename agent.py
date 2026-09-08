@@ -14,7 +14,6 @@ import json
 import os
 import shutil
 import socket
-import string
 import sys
 import tempfile
 import threading
@@ -28,9 +27,8 @@ import gpu_setup
 import inference
 import training
 
-# ponytail: 2.0였다가 1.0으로 줄임 - 원격 경로 탐색(list_dir)이 이 주기 하나로 명령을 받고
-# 결과를 돌려보내는 구조라, 폴더 하나씩 클릭할 때마다 최대 이 값만큼 지연이 생겨 사용자가
-# "자주 끊긴다"고 느꼈음. LAN 안에서 JSON 몇 바이트 주고받는 정도라 1초로 줄여도 부담 적음.
+# ponytail: 2.0였다가 1.0으로 줄임 - 명령 수신/로그 반영 지연을 줄여서 체감 반응성을
+# 높임. LAN 안에서 JSON 몇 바이트 주고받는 정도라 1초로 줄여도 부담 적음.
 POLL_INTERVAL_SECONDS = 1.0
 
 
@@ -86,35 +84,6 @@ def _upload_result(server: str, token: str, agent_id: str, run_root: str) -> Non
     with urllib.request.urlopen(req, timeout=300) as resp:
         json.loads(resp.read().decode("utf-8"))
     print("[Agent] 업로드 완료.", flush=True)
-
-
-def _list_dir(path: str):
-    """중앙 PC가 이 워커 PC의 경로를 골라야 할 때(6번/5번 탭에서 원격 대상 선택 중
-    "찾기..." -> RemoteBrowseDialog) 씀. path가 비어있으면 윈도우 드라이브 목록을 줌."""
-    if not path:
-        drives = [f"{letter}:\\" for letter in string.ascii_uppercase if os.path.exists(f"{letter}:\\")]
-        return [{"name": d, "path": d, "isDir": True} for d in drives], None
-    try:
-        entries = []
-        with os.scandir(path) as it:
-            for item in it:
-                try:
-                    entries.append({"name": item.name, "path": item.path, "isDir": item.is_dir()})
-                except OSError:
-                    continue
-        entries.sort(key=lambda e: (not e["isDir"], e["name"].lower()))
-        return entries, None
-    except OSError as exc:
-        return [], str(exc)
-
-
-def _handle_list_dir(server: str, token: str, agent_id: str, command: dict) -> None:
-    path = command.get("path") or ""
-    entries, error = _list_dir(path)
-    with contextlib.suppress(Exception):
-        _post(server, token, "/dir_result", {
-            "agentId": agent_id, "requestId": command.get("requestId"),
-            "path": path, "entries": entries, "error": error})
 
 
 def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
@@ -181,9 +150,7 @@ def run_agent(server: str, token: str, agent_id: str,
             continue
 
         command = result.get("command")
-        if command and command.get("type") == "list_dir":
-            _handle_list_dir(server, token, agent_id, command)
-        elif command and command.get("type") in ("start_job", "start_training"):
+        if command and command.get("type") in ("start_job", "start_training"):
             label = command.get("runName") or command.get("name") or "(자동 이름)"
             log(f"[Agent] 작업 수신: {label}")
             _run_job(server, token, agent_id, command)

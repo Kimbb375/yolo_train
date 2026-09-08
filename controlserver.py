@@ -13,9 +13,7 @@ WebSocket 대비 트레이드오프지만 새 패키지 없이 되는 게 이득
   POST /poll      {agentId, progress}                대기 중인 명령 하나 반환(없으면 null)
   POST /log       {agentId, lines: [...]}            진행 로그 append
   POST /done      {agentId, ok, message}             작업 종료 보고
-  POST /command   {targetAgentId, command}           컨트롤러가 명령 큐에 적재 ("all" 가능,
-                                                      command.type="list_dir"로 원격 폴더 탐색도 가능)
-  POST /dir_result {agentId, requestId, path, entries, error}  list_dir 명령 결과 보고
+  POST /command   {targetAgentId, command}           컨트롤러가 명령 큐에 적재 ("all" 가능)
   POST /upload    (raw zip bytes, X-Agent-Id/X-Run-Name 헤더)  결과 중앙 저장(mirror_root 설정 시)
   GET  /status                                       전체 에이전트 상태 스냅샷(컨트롤러 UI용)
 """
@@ -57,24 +55,11 @@ class ControlServer:
         self._agents: dict[str, AgentState] = {}
         self._commands: dict[str, list[dict]] = {}
         self._mirror_root: Optional[str] = None
-        self._dir_results: dict[str, dict] = {}
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def check_token(self, token: Optional[str]) -> bool:
         return token == self._token
-
-    def report_dir_result(self, agent_id: str, request_id, path: str,
-                           entries: list, error: Optional[str]) -> None:
-        """agent.py가 list_dir 명령 결과로 올린 폴더 목록. 원격 경로 선택 다이얼로그
-        (main.py RemoteBrowseDialog)가 이 값을 폴링해서 화면에 뿌림."""
-        with self._lock:
-            self._dir_results[agent_id] = {
-                "requestId": request_id, "path": path, "entries": entries, "error": error}
-
-    def get_dir_result(self, agent_id: str) -> Optional[dict]:
-        with self._lock:
-            return self._dir_results.get(agent_id)
 
     def set_mirror_root(self, path: Optional[str]) -> None:
         with self._lock:
@@ -241,11 +226,6 @@ class ControlServer:
                         self._send_json(200, {"ok": True})
                     elif self.path == "/command":
                         server.queue_command(data["targetAgentId"], data["command"])
-                        self._send_json(200, {"ok": True})
-                    elif self.path == "/dir_result":
-                        server.report_dir_result(data["agentId"], data.get("requestId"),
-                                                  data.get("path", ""), data.get("entries", []),
-                                                  data.get("error"))
                         self._send_json(200, {"ok": True})
                     else:
                         self._send_json(404, {"error": "not found"})
