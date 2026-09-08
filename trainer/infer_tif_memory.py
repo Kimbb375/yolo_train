@@ -507,6 +507,24 @@ def process_loaded_tif(model, loaded, args, tile, stride, batch, limit_remaining
     }
 
 
+def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
+    """options에 engine=1을 주면 .pt를 TensorRT .engine으로 변환해 캐시하고 그 경로를 씀.
+    ponytail: dynamic=True로 배치 크기 고정 안 함 - 매 tif마다 마지막 배치는 나머지 개수라
+    static engine이면 크기 안 맞아 에러남. 정적 배치보다 조금 덜 최적화되지만 항상 동작함."""
+    pt = Path(pt_path)
+    engine_path = pt.with_name(f"{pt.stem}_imgsz{imgsz}_{'fp16' if half else 'fp32'}.engine")
+    if engine_path.is_file():
+        return str(engine_path)
+    from ultralytics import YOLO as _YOLO
+    print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)
+    exported = _YOLO(pt_path).export(format="engine", imgsz=imgsz, half=half, dynamic=True, device=0)
+    exported_path = Path(exported)
+    if exported_path != engine_path:
+        exported_path.replace(engine_path)
+    print(f"[TensorRT] engine 준비 완료: {engine_path}", flush=True)
+    return str(engine_path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
@@ -571,12 +589,25 @@ def main():
     # 재봐야 함(작은 배치에서는 오히려 느려질 수 있음, 위 half_option 주석 참고).
     args.half = half_option and str(args.device).lower() != "cpu" and torch.cuda.is_available()
 
+    # ponytail: 실험용 TensorRT 경로. engine=1 켜면 .pt -> .engine 변환(최초 1회 캐시)해서 로드함.
+    # GPU 없으면 TensorRT 자체가 의미 없어서 조용히 .pt로 폴백함.
+    engine_option = get_bool(options, "engine", False)
+    model_path_to_load = args.model
+    if engine_option:
+        if str(args.device).lower() == "cpu" or not torch.cuda.is_available():
+            print("[TensorRT] GPU가 없어 engine 옵션을 무시하고 기존 .pt로 진행합니다.", flush=True)
+        else:
+            try:
+                model_path_to_load = _ensure_trt_engine(args.model, args.imgsz, args.half)
+            except Exception as exc:
+                print(f"[TensorRT] engine 변환 실패({exc}) - 기존 .pt로 계속 진행합니다.", flush=True)
+
     source_root = Path(args.source)
     run_root = Path(args.output) / args.run_name
     run_root.mkdir(parents=True, exist_ok=True)
     (run_root / "candidates").mkdir(parents=True, exist_ok=True)
     (run_root / "candidates_by_tif").mkdir(parents=True, exist_ok=True)
-    model = YOLO(args.model)
+    model = YOLO(model_path_to_load)
     raw_candidates_path = run_root / "raw_candidates.jsonl"
     if not resume or not raw_candidates_path.exists():
         raw_candidates_path.write_text("", encoding="utf-8")

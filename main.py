@@ -1017,6 +1017,15 @@ class InferenceTab(QWidget):
         self.start_button.setEnabled(True)
 
 
+class InferenceTestTab(InferenceTab):
+    """6-1. 원본 추론 테스트 — 6번과 완전히 동일한 로직이되, TensorRT engine 변환(engine=1)을
+    기본으로 켜서 켜보는 실험용 탭. 배포 자동화가 번거로우면 이 탭만 지워도 6번엔 영향 없음."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.options_input.setText(self.options_input.text() + ", engine=1")
+
+
 class CandidateImageLabel(QLabel):
     """후보 크롭 이미지 표시 영역. 클릭해서 포커스를 줘야 A/D/Space/X 키가 먹음(§알아둘 것).
     set_box()로 받은 박스(표시된 pixmap 픽셀 좌표)를 빨간 사각형으로 겹쳐 그림 - 저장된
@@ -2073,6 +2082,7 @@ def main() -> int:
     tabs.addTab(YoloOrganizeTab(), "4. YOLO 정렬")
     tabs.addTab(TrainingTab(), "5. 학습")
     tabs.addTab(InferenceTab(), "6. 원본 추론")
+    tabs.addTab(InferenceTestTab(), "6-1. 원본 추론 테스트(TensorRT)")
     tabs.addTab(ReviewTab(), "7. 후보 검수")
     tabs.addTab(CompareTab(), "8. 매칭/선별")
     tabs.addTab(LabelSyncTab(), "9. TXT 보정 반영")
