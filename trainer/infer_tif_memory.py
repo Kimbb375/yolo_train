@@ -510,14 +510,16 @@ def process_loaded_tif(model, loaded, args, tile, stride, batch, limit_remaining
 def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     """options에 engine=1을 주면 .pt를 TensorRT .engine으로 변환해 캐시하고 그 경로를 씀.
     ponytail: dynamic=True로 배치 크기 고정 안 함 - 매 tif마다 마지막 배치는 나머지 개수라
-    static engine이면 크기 안 맞아 에러남. 정적 배치보다 조금 덜 최적화되지만 항상 동작함."""
+    static engine이면 크기 안 맞아 에러남. 정적 배치보다 조금 덜 최적화되지만 항상 동작함.
+    batch=32는 이 dynamic engine이 받을 수 있는 최대 배치 상한 - options의 batch가 32를
+    넘으면 추론 시 에러남(현재 옵션 기본값은 8~16대라 문제 없음)."""
     pt = Path(pt_path)
     engine_path = pt.with_name(f"{pt.stem}_imgsz{imgsz}_{'fp16' if half else 'fp32'}.engine")
     if engine_path.is_file():
         return str(engine_path)
     from ultralytics import YOLO as _YOLO
     print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)
-    exported = _YOLO(pt_path).export(format="engine", imgsz=imgsz, half=half, dynamic=True, device=0)
+    exported = _YOLO(pt_path).export(format="engine", imgsz=imgsz, half=half, dynamic=True, batch=32, device=0)
     exported_path = Path(exported)
     if exported_path != engine_path:
         exported_path.replace(engine_path)
