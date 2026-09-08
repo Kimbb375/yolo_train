@@ -4,6 +4,11 @@
 python test_controlserver.py 로 직접 실행.
 """
 
+import io
+import os
+import tempfile
+import zipfile
+
 import controlserver
 
 
@@ -61,7 +66,37 @@ def check_log_and_done() -> None:
     print("OK: 로그 append + 작업 완료 처리(currentJob 초기화) 검증.")
 
 
+def _make_zip_bytes(entries: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in entries.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def check_upload_extracts_and_blocks_zip_slip() -> None:
+    server = controlserver.ControlServer(token="secret")
+    with tempfile.TemporaryDirectory() as tmp:
+        # mirror_root 미설정이면 업로드는 그냥 무시(False)됨 - 설정 안 한 사용자에게 실수로
+        # 아무 데나 안 풀리게.
+        assert not server.receive_upload("pc1", "run1", _make_zip_bytes({"a.txt": "hi"}))
+
+        server.set_mirror_root(tmp)
+        good_zip = _make_zip_bytes({"candidates.json": "{}", "candidates/a.png": "x"})
+        assert server.receive_upload("pc1", "run1", good_zip)
+        assert os.path.isfile(os.path.join(tmp, "pc1", "run1", "candidates.json"))
+        assert os.path.isfile(os.path.join(tmp, "pc1", "run1", "candidates", "a.png"))
+
+        # 조작된 zip(경로 순회로 dest_dir 밖에 쓰려는 것)은 통째로 거부되어야 함(zip slip 방지).
+        evil_zip = _make_zip_bytes({"../../evil.txt": "pwned"})
+        assert not server.receive_upload("pc1", "run2", evil_zip)
+        assert not os.path.isfile(os.path.join(tmp, "evil.txt"))
+
+    print("OK: /upload 결과 압축 해제 + mirror_root 미설정시 무시 + zip slip 차단 검증.")
+
+
 if __name__ == "__main__":
     check_auth_and_register()
     check_command_queue_and_targeting()
     check_log_and_done()
+    check_upload_extracts_and_blocks_zip_slip()

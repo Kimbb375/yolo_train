@@ -13,16 +13,20 @@ WebSocket 대비 트레이드오프지만 새 패키지 없이 되는 게 이득
   POST /log       {agentId, lines: [...]}            진행 로그 append
   POST /done      {agentId, ok, message}             작업 종료 보고
   POST /command   {targetAgentId, command}           컨트롤러가 명령 큐에 적재 ("all" 가능)
+  POST /upload    (raw zip bytes, X-Agent-Id/X-Run-Name 헤더)  결과 중앙 저장(mirror_root 설정 시)
   GET  /status                                       전체 에이전트 상태 스냅샷(컨트롤러 UI용)
 """
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Optional
 
 ONLINE_TIMEOUT_SECONDS = 15.0
@@ -49,11 +53,41 @@ class ControlServer:
         self._lock = threading.Lock()
         self._agents: dict[str, AgentState] = {}
         self._commands: dict[str, list[dict]] = {}
+        self._mirror_root: Optional[str] = None
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def check_token(self, token: Optional[str]) -> bool:
         return token == self._token
+
+    def set_mirror_root(self, path: Optional[str]) -> None:
+        with self._lock:
+            self._mirror_root = path or None
+
+    def receive_upload(self, agent_id: str, run_name: str, data: bytes) -> bool:
+        """agent.py가 작업 완료 후(옵션 mirror=1일 때) 올린 run_root 전체 zip을 이 PC의
+        중앙 저장 경로 밑에 풀어줌. ponytail: 전체를 메모리로 받음(단순함 우선) - 워커 결과
+        폴더가 아주 커지면(수 GB) 청크 스트리밍으로 바꿔야 함.
+
+        압축 해제 전에 각 항목 경로가 dest_dir 밖으로 못 나가게 검사함("zip slip" 방지 -
+        agent.py가 만드는 정상 zip은 문제없지만, 토큰 유출 시 조작된 zip으로 임의 경로에
+        파일을 쓰는 걸 막기 위한 방어)."""
+        with self._lock:
+            mirror_root = self._mirror_root
+        if not mirror_root or not data:
+            return False
+        dest_dir = (Path(mirror_root) / agent_id / run_name).resolve()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for member in zf.infolist():
+                    target = (dest_dir / member.filename).resolve()
+                    if target != dest_dir and dest_dir not in target.parents:
+                        raise ValueError(f"unsafe zip entry path: {member.filename}")
+                zf.extractall(dest_dir)
+            return True
+        except (zipfile.BadZipFile, OSError, ValueError):
+            return False
 
     def register(self, agent_id: str, hostname: str, gpu: str) -> None:
         with self._lock:
@@ -109,7 +143,10 @@ class ControlServer:
                         "agentId": s.agentId, "hostname": s.hostname, "gpu": s.gpu,
                         "online": (now - s.lastSeen) < ONLINE_TIMEOUT_SECONDS,
                         "currentJob": s.currentJob, "progress": s.progress,
-                        "logTail": list(s.logTail[-50:]),
+                        # 컨트롤러 쪽이 이 리스트를 인덱스 기반으로 증분 표시하므로(main.py
+                        # InferenceTab._poll_remote) 여기서 또 자르면 안 됨 - append_log에서
+                        # 이미 LOG_TAIL_LIMIT(500)로 상한을 걸어둠.
+                        "logTail": list(s.logTail),
                     }
                     for s in self._agents.values()
                 ]
@@ -150,6 +187,14 @@ class ControlServer:
             def do_POST(self) -> None:  # noqa: N802
                 if not self._authorized():
                     self._send_json(403, {"error": "unauthorized"})
+                    return
+                if self.path == "/upload":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    raw = self.rfile.read(length) if length else b""
+                    ok = server.receive_upload(
+                        self.headers.get("X-Agent-Id", "unknown"),
+                        self.headers.get("X-Run-Name", "run"), raw)
+                    self._send_json(200 if ok else 400, {"ok": ok})
                     return
                 try:
                     data = self._read_json()

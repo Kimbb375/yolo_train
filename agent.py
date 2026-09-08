@@ -11,11 +11,15 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import shutil
 import socket
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import gpu_setup
 import inference
@@ -57,6 +61,26 @@ class _TeeToServer(io.TextIOBase):
         self._last_flush = time.time()
 
 
+def _upload_result(server: str, token: str, agent_id: str, run_root: str) -> None:
+    """작업이 성공하고 command에 mirror=1이 있을 때 run_root 전체를 zip으로 묶어 중앙 서버로
+    올림(controlserver.py의 /upload, 중앙 저장 경로가 설정돼 있으면 그 밑에 풀림). 업로드
+    실패는 작업 자체 실패로 취급하지 않고 로그만 남김 - 결과는 이미 이 워커 PC 로컬에 있음."""
+    run_root_path = Path(run_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_base = os.path.join(tmp, "run")
+        zip_path = shutil.make_archive(zip_base, "zip", root_dir=run_root_path)
+        print(f"[Agent] 결과를 중앙으로 업로드 중... ({zip_path})", flush=True)
+        with open(zip_path, "rb") as fh:
+            data = fh.read()
+    req = urllib.request.Request(
+        server.rstrip("/") + "/upload", data=data, method="POST",
+        headers={"Content-Type": "application/octet-stream", "X-Control-Token": token,
+                 "X-Agent-Id": agent_id, "X-Run-Name": run_root_path.name})
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        json.loads(resp.read().decode("utf-8"))
+    print("[Agent] 업로드 완료.", flush=True)
+
+
 def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
     def send_lines(text: str) -> None:
         lines = [ln for ln in text.split("\n") if ln]
@@ -67,6 +91,7 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
     real_stdout = sys.stdout
     sys.stdout = _TeeToServer(real_stdout, send_lines)
     ok, message = True, "완료"
+    result = None
     try:
         result = inference.run(
             command["source"], command["output"], command["model"],
@@ -75,9 +100,13 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
     except Exception as exc:  # noqa: BLE001 - 실패도 서버에 보고해야 다른 PC 결과와 취합 가능
         ok = False
         message = str(exc)
-    finally:
-        sys.stdout.flush()
-        sys.stdout = real_stdout
+    if ok and result is not None and command.get("mirror"):
+        try:
+            _upload_result(server, token, agent_id, result.runRootPath)
+        except Exception as exc:  # noqa: BLE001 - 업로드 실패해도 추론 자체는 성공이라 계속 보고
+            print(f"[Agent] 중앙 업로드 실패: {exc}", flush=True)
+    sys.stdout.flush()
+    sys.stdout = real_stdout
     with contextlib.suppress(Exception):
         _post(server, token, "/done", {"agentId": agent_id, "ok": ok, "message": message})
 

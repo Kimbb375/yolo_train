@@ -99,15 +99,30 @@ def tile_starts(length, tile, stride):
     return sorted(set(values))
 
 
+# ponytail: np.percentile은 정렬 기반(O(n log n))이라 큰 원본 TIF(수억 픽셀)에서 로딩 시간의
+# 상당 부분을 차지함 - 통계/스트레치 기준값 용도로는 전수 정렬 대신 일부 샘플로도 충분히
+# 정확함(표준적인 percentile-stretch 근사 방식). min/mean/max는 단순 O(n) 통과라 그대로 둠.
+_PERCENTILE_SAMPLE_LIMIT = 2_000_000
+
+
+def _sample_for_percentile(finite):
+    if finite.size <= _PERCENTILE_SAMPLE_LIMIT:
+        return finite
+    rng = np.random.default_rng(0)
+    idx = rng.integers(0, finite.size, size=_PERCENTILE_SAMPLE_LIMIT)
+    return finite[idx]
+
+
 def image_stats(arr):
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
         return {"min": 0, "p1": 0, "mean": 0, "p99": 0, "max": 0}
+    sample = _sample_for_percentile(finite)
     return {
         "min": float(np.min(finite)),
-        "p1": float(np.percentile(finite, 1)),
+        "p1": float(np.percentile(sample, 1)),
         "mean": float(np.mean(finite)),
-        "p99": float(np.percentile(finite, 99)),
+        "p99": float(np.percentile(sample, 99)),
         "max": float(np.max(finite)),
     }
 
@@ -130,7 +145,7 @@ def scale_to_uint8(arr, preprocess):
             finite = arr32[np.isfinite(arr32)]
             if finite.size == 0:
                 return np.zeros(arr.shape, dtype=np.uint8)
-            lo, hi = np.percentile(finite, (1, 99))
+            lo, hi = np.percentile(_sample_for_percentile(finite), (1, 99))
             if hi <= lo:
                 hi = lo + 1.0
             return np.clip((arr32 - lo) * 255.0 / (hi - lo), 0, 255).astype(np.uint8)
@@ -140,7 +155,7 @@ def scale_to_uint8(arr, preprocess):
     finite = arr32[np.isfinite(arr32)]
     if finite.size == 0:
         return np.zeros(arr.shape, dtype=np.uint8)
-    lo, hi = np.percentile(finite, (1, 99))
+    lo, hi = np.percentile(_sample_for_percentile(finite), (1, 99))
     if hi <= lo:
         hi = lo + 1.0
     return np.clip((arr32 - lo) * 255.0 / (hi - lo), 0, 255).astype(np.uint8)
@@ -191,22 +206,42 @@ def load_tif(tif_path, preprocess, invert):
     }
 
 
-def start_loader(tif_paths, prefetch, preprocess, invert):
+def start_loader(tif_paths, prefetch, preprocess, invert, load_workers=1):
+    """여러 tif를 동시에 읽는 프리페치 로더. 파일마다 읽기(디스크/네트워크 I/O)+percentile
+    계산(CPU)이 걸리는데, load_workers>1이면 여러 스레드가 동시에 다음 파일들을 미리 읽어
+    큐(work_queue)에 채워둠 - 특히 네트워크 공유폴더 원본일 때 지연시간을 크게 줄여줌.
+    파일 처리 순서는 완료되는 대로라 뒤바뀔 수 있음(파일별로 독립 처리라 문제 없음)."""
     work_queue = queue.Queue(maxsize=max(1, prefetch))
+    index_queue = queue.Queue()
+    for tif_path in tif_paths:
+        index_queue.put(tif_path)
 
     def worker():
-        try:
-            for tif_path in tif_paths:
+        while True:
+            try:
+                tif_path = index_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
                 print(f"Prefetch loading {tif_path.name}", flush=True)
                 work_queue.put(load_tif(tif_path, preprocess, invert))
-        except Exception as exc:
-            work_queue.put(exc)
-        finally:
-            work_queue.put(SENTINEL)
+            except Exception as exc:
+                work_queue.put(exc)
+                return
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    return work_queue, thread
+    worker_count = max(1, min(load_workers, len(tif_paths)))
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(worker_count)]
+    for thread in threads:
+        thread.start()
+
+    def waiter():
+        for thread in threads:
+            thread.join()
+        work_queue.put(SENTINEL)
+
+    waiter_thread = threading.Thread(target=waiter, daemon=True)
+    waiter_thread.start()
+    return work_queue, waiter_thread
 
 
 def box_to_record(source_path, tile_name, tile_left, tile_top, cls_id, conf, xyxy):
@@ -345,7 +380,7 @@ def save_candidate_assets(candidates, image, run_root, crop_size, context, candi
         cand["candidateCropBox"] = asset_info["cropBox"]
 
 
-def write_documents(run_root, source_root, model_path, options_text, tile_count, all_candidates, per_tif_records, progress):
+def write_documents(run_root, source_root, model_path, options_text, tile_count, all_candidates, progress):
     document = {
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "sourceTifFolderPath": str(source_root),
@@ -359,11 +394,15 @@ def write_documents(run_root, source_root, model_path, options_text, tile_count,
     (run_root / "candidates.json").write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     (run_root / "progress.json").write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
+def write_tif_record(run_root, record):
+    # ponytail: write_documents가 예전엔 매 파일마다 per_tif_records 전체를 다시 써서
+    # (이미 디스크에 있는 이전 파일들 것까지) 파일 수가 늘수록 느려지는 O(n^2)이었음 -
+    # 새로 끝난 파일 것 하나만 씀.
     by_tif_root = run_root / "candidates_by_tif"
     by_tif_root.mkdir(parents=True, exist_ok=True)
-    for record in per_tif_records:
-        path = by_tif_root / f"{Path(record['sourceTifPath']).stem}.json"
-        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = by_tif_root / f"{Path(record['sourceTifPath']).stem}.json"
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def append_raw_candidates(raw_path, candidates):
@@ -512,9 +551,24 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     ponytail: dynamic=True로 배치 크기 고정 안 함 - 매 tif마다 마지막 배치는 나머지 개수라
     static engine이면 크기 안 맞아 에러남. 정적 배치보다 조금 덜 최적화되지만 항상 동작함.
     batch=32는 이 dynamic engine이 받을 수 있는 최대 배치 상한 - options의 batch가 32를
-    넘으면 추론 시 에러남(현재 옵션 기본값은 8~16대라 문제 없음)."""
+    넘으면 추론 시 에러남(현재 옵션 기본값은 8~16대라 문제 없음).
+
+    engine 캐시는 .pt 옆이 아니라 이 PC 로컬(ROOT/trt_cache)에 GPU 이름까지 넣어서 저장함 -
+    TensorRT engine은 만든 GPU 아키텍처에서만 동작하는데, 10번 중앙 제어로 여러 PC가 같은
+    네트워크 공유 .pt를 가리키는 경우 PC마다 GPU가 다를 수 있어서 그렇게 하지 않으면 다른
+    PC가 만든(호환 안 되는) engine을 잘못 집어쓰게 됨."""
+    import re as _re
+    import torch as _torch
+    gpu_name = _torch.cuda.get_device_name(0) if _torch.cuda.is_available() else "cpu"
+    safe_gpu = _re.sub(r"[^A-Za-z0-9]+", "_", gpu_name).strip("_")
+
     pt = Path(pt_path)
-    engine_path = pt.with_name(f"{pt.stem}_imgsz{imgsz}_{'fp16' if half else 'fp32'}.engine")
+    pt_stat = pt.stat()
+    cache_dir = ROOT / "trt_cache"
+    cache_dir.mkdir(exist_ok=True)
+    engine_path = cache_dir / (
+        f"{pt.stem}_{pt_stat.st_size}_{int(pt_stat.st_mtime)}"
+        f"_imgsz{imgsz}_{'fp16' if half else 'fp32'}_{safe_gpu}.engine")
     if engine_path.is_file():
         return str(engine_path)
 
@@ -574,6 +628,7 @@ def main():
     if candidate_view not in ("tile", "center"):
         raise ValueError("candidate_view must be tile or center")
     prefetch = get_int(options, "prefetch", 3)
+    load_workers = get_int(options, "load_workers", 3)
     progress_every = max(1, get_int(options, "progress_every", 100))
     args.debug_tiles = get_int(options, "debug_tiles", 0)
     recursive = get_bool(options, "recursive", True)
@@ -636,7 +691,6 @@ def main():
             raise FileNotFoundError(f"Shard {shard}/{num_shards} has no TIF files assigned.")
 
     all_candidates = []
-    per_tif_records = []
     total_tiles = 0
     next_candidate_id = 1
     processed_stems = set()
@@ -649,7 +703,6 @@ def main():
             if record_path.is_file():
                 try:
                     record_data = json.loads(record_path.read_text(encoding="utf-8"))
-                    per_tif_records.append(record_data)
                     cands = record_data.get("candidates", [])
                     all_candidates.extend(cands)
                     total_tiles += record_data.get("tileCount", 0)
@@ -675,7 +728,7 @@ def main():
         "completed": len(tif_paths) == 0,
         "phase": "start",
     }
-    write_documents(run_root, source_root, args.model, args.options, total_tiles, all_candidates, per_tif_records, progress)
+    write_documents(run_root, source_root, args.model, args.options, total_tiles, all_candidates, progress)
 
     print(f"Run root: {run_root}", flush=True)
     print(f"Source input: {args.source}", flush=True)
@@ -687,14 +740,53 @@ def main():
             print(f"[RESUME] All {len(all_tif_paths)} files in '{run_root.name}' are already completed.", flush=True)
     print(
         f"Tiling memory: tile={tile}, overlap={overlap}, stride={stride}, batch={batch}, "
-        f"prefetch={prefetch}, recursive={recursive}, files={len(all_tif_paths)}, "
+        f"prefetch={prefetch}, load_workers={load_workers}, recursive={recursive}, files={len(all_tif_paths)}, "
         f"preprocess={preprocess}, invert={invert}, edge_filter={args.edge_filter}, "
         f"edge_margin={args.edge_margin}",
         flush=True,
     )
 
     if tif_paths:
-        work_queue, loader = start_loader(tif_paths, prefetch, preprocess, invert)
+        # ponytail: candidate crop 저장(PNG/txt/json 여러 개) + candidates.json 전체 재작성은
+        # 다음 파일 GPU 추론과 무관한 디스크 I/O인데 지금까지 메인 루프에서 동기로 처리해서
+        # 그동안 GPU가 놀았음(사용자 보고: "infer/save가 느림"). 백그라운드 스레드 하나로
+        # 옮겨서 다음 파일 타일링/추론이 저장을 안 기다리게 함. save_queue maxsize=2라
+        # 디스크가 GPU보다 느리면 여기서 자연스럽게 backpressure 걸림(무한정 쌓이진 않음).
+        save_queue = queue.Queue(maxsize=2)
+        save_errors = []
+
+        def save_worker():
+            while True:
+                job = save_queue.get()
+                if job is SENTINEL:
+                    return
+                tif_path, image, merged, tif_record, progress_snapshot, tile_count_snapshot = job
+                try:
+                    save_candidate_assets(merged, image, run_root, crop_size, crop_context, candidate_view)
+                    all_candidates.extend(merged)
+                    write_documents(run_root, source_root, args.model, args.options,
+                                     tile_count_snapshot, all_candidates, progress_snapshot)
+                    write_tif_record(run_root, tif_record)
+                    print(
+                        f"{tif_path.name}: {tif_record['width']}x{tif_record['height']}, "
+                        f"tiles={tif_record['tileCount']}, raw={tif_record['rawCandidateCount']}, "
+                        f"edge_filtered={tif_record['edgeFilteredCount']}, "
+                        f"merged={tif_record['candidateCount']}, infer={tif_record['inferSeconds']:.2f}s",
+                        flush=True,
+                    )
+                    # main.py InferenceTab이 이 줄로 전체 진행률 바를 갱신함 - 파일마다 타일 수가
+                    # 달라서 "타일 진행"만 보여주면 파일 넘어갈 때마다 바가 되돌아가 보임(사용자
+                    # 보고: "바가 왔다갔다"). 전체 파일 중 완료 개수 기준이 훨씬 안정적임.
+                    print(f"[FILE PROGRESS] {progress_snapshot['completedFiles']}/{progress_snapshot['totalFiles']}", flush=True)
+                    print(f"Saved intermediate candidates: {run_root / 'candidates.json'}", flush=True)
+                except Exception as exc:  # noqa: BLE001 - 백그라운드 실패도 로그/최종 raise로 드러내야 함
+                    save_errors.append(exc)
+                    print(f"[SAVE ERROR] {tif_path.name}: {exc}", flush=True)
+
+        save_thread = threading.Thread(target=save_worker, daemon=True)
+        save_thread.start()
+
+        work_queue, loader = start_loader(tif_paths, prefetch, preprocess, invert, load_workers)
         while True:
             loaded = work_queue.get()
             if loaded is SENTINEL:
@@ -734,9 +826,7 @@ def main():
             )
             merged = merge_candidates(processed["rawCandidates"], merge_iou, next_candidate_id)
             next_candidate_id += len(merged)
-            save_candidate_assets(merged, processed["image"], run_root, crop_size, crop_context, candidate_view)
             total_tiles += processed["tileCount"]
-            all_candidates.extend(merged)
             completed_files += 1
 
             tif_record = {
@@ -755,32 +845,22 @@ def main():
                 "imageStats": loaded["stats"],
                 "candidates": merged,
             }
-            per_tif_records.append(tif_record)
             progress.update(
                 {
                     "updatedAt": datetime.now(timezone.utc).isoformat(),
                     "completedFiles": completed_files,
                     "totalFiles": len(all_tif_paths),
                     "tileCount": total_tiles,
-                    "candidateCount": len(all_candidates),
+                    "candidateCount": len(all_candidates) + len(merged),
                     "lastCompleted": tif_path.name,
                     "elapsedSeconds": time.perf_counter() - run_started,
                     "phase": "saved_tif",
                 }
             )
-            write_documents(run_root, source_root, args.model, args.options, total_tiles, all_candidates, per_tif_records, progress)
-            print(
-                f"{tif_path.name}: {processed['width']}x{processed['height']}, "
-                f"tiles={processed['tileCount']}, raw={len(processed['rawCandidates'])}, "
-                f"edge_filtered={processed['edgeFilteredCount']}, "
-                f"merged={len(merged)}, infer={processed['inferSeconds']:.2f}s",
-                flush=True,
-            )
-            # main.py InferenceTab이 이 줄로 전체 진행률 바를 갱신함 - 파일마다 타일 수가
-            # 달라서 "타일 진행"만 보여주면 파일 넘어갈 때마다 바가 되돌아가 보임(사용자
-            # 보고: "바가 왔다갔다"). 전체 파일 중 완료 개수 기준이 훨씬 안정적임.
-            print(f"[FILE PROGRESS] {completed_files}/{len(all_tif_paths)}", flush=True)
-            print(f"Saved intermediate candidates: {run_root / 'candidates.json'}", flush=True)
+            # 실제 저장/로그 출력은 save_worker 스레드가 함(위 주석 참고) - 큐가 꽉 차면
+            # (기본 2개) 여기서 잠깐 블록되는데, 디스크가 못 따라가는 만큼의 자연스러운
+            # backpressure라 무한정 메모리에 쌓이진 않음.
+            save_queue.put((tif_path, processed["image"], merged, tif_record, dict(progress), total_tiles))
 
             del processed
             del loaded
@@ -788,6 +868,10 @@ def main():
                 break
 
         loader.join(timeout=1)
+        save_queue.put(SENTINEL)
+        save_thread.join()
+        if save_errors:
+            raise save_errors[0]
     final_progress = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "completedFiles": completed_files,
@@ -799,7 +883,7 @@ def main():
         "phase": "complete",
         "elapsedSeconds": time.perf_counter() - run_started,
     }
-    write_documents(run_root, source_root, args.model, args.options, total_tiles, all_candidates, per_tif_records, final_progress)
+    write_documents(run_root, source_root, args.model, args.options, total_tiles, all_candidates, final_progress)
     print(f"Candidates: {len(all_candidates)}", flush=True)
     print(f"Candidate JSON: {run_root / 'candidates.json'}", flush=True)
 
