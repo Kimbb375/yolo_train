@@ -116,9 +116,20 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
              f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}",
              "--index-url", INDEX_URL],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output_lines = []
         for line in process.stdout:
+            output_lines.append(line)
             log("[GPU] " + line.rstrip())
         ok = process.wait() == 0
+        if not ok and any("WinError 206" in ln or "너무 깁니다" in ln for ln in output_lines):
+            # torch wheel에 번들된 서드파티(kineto/dynolog/prometheus-cpp/googletest) 라이선스
+            # 파일 경로가 원래 깊은데, 설치 경로까지 깊으면(중첩 폴더 등) 합쳐서 Windows
+            # MAX_PATH(260자) 제한에 걸림 - pip/torch 버그가 아니라 OS 제한이라 코드로는
+            # 못 없앰, 레지스트리로 "Windows 긴 경로 지원"을 켜야 함(관리자 권한, 1회성).
+            log("[GPU] 원인: 설치 경로가 길어서 Windows 경로 길이 제한(260자)에 걸림. "
+                "해결: 관리자 권한 PowerShell에서 아래 명령 실행 후 재부팅하고 다시 시도하세요.")
+            log('[GPU]   New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem" '
+                '-Name "LongPathsEnabled" -Value 1 -PropertyType DWord -Force')
     except Exception as exc:  # noqa: BLE001 - 설치 실패는 CPU 폴백으로 처리
         log(f"[GPU] 설치 실패: {exc}")
 
