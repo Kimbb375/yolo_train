@@ -1406,10 +1406,38 @@ class CandidateImageLabel(QLabel):
         # None이면 "가운데 정렬(배율 1배)"을 매번 다시 계산함 - 확대(휠) 전까진 창 크기가
         # 바뀌어도 항상 가운데 맞춰짐. 한 번 확대하면 그때부터는 사용자가 지정한 위치 고정.
         self._offset: Optional[QPointF] = None
+        self._drag_start: Optional[QPointF] = None
+        self._drag_start_offset: Optional[QPointF] = None
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         self.setFocus()
+        # 배율 1배(전체 보기)면 옮길 게 없음 - 확대된 상태에서만 클릭+드래그로 이동 시작.
+        if event.button() == Qt.MouseButton.LeftButton and self._image is not None and self._zoom > self._MIN_ZOOM:
+            self._drag_start = event.position()
+            self._drag_start_offset = self._current_offset(self._current_scale())
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if self._drag_start is not None:
+            delta = event.position() - self._drag_start
+            self._offset = self._drag_start_offset + delta
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if self._drag_start is not None:
+            self._drag_start = None
+            self._drag_start_offset = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self._zoom > self._MIN_ZOOM
+                            else Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def set_image(self, pixmap: Optional[QPixmap]) -> None:
         self._image = pixmap if (pixmap is not None and not pixmap.isNull()) else None
@@ -1417,6 +1445,7 @@ class CandidateImageLabel(QLabel):
         self.setPixmap(QPixmap())
         self._zoom = 1.0
         self._offset = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
     def set_box(self, box: Optional[tuple[float, float, float, float]],
@@ -1466,6 +1495,8 @@ class CandidateImageLabel(QLabel):
         else:
             self._offset = QPointF(mouse_pos.x() - image_point.x() * new_scale,
                                     mouse_pos.y() - image_point.y() * new_scale)
+        self.setCursor(Qt.CursorShape.OpenHandCursor if new_zoom > self._MIN_ZOOM
+                        else Qt.CursorShape.ArrowCursor)
         self.update()
         event.accept()
 
