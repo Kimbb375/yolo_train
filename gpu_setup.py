@@ -37,10 +37,20 @@ def _marker_path() -> str:
 
 
 def _cuda_available() -> bool:
+    # 별도 프로세스에서 확인함(이 프로세스에 직접 import torch 하지 않음) - 이 GUI 앱은
+    # 장기 실행되는데, 여기서 torch를 import해버리면 torch/_C.*.pyd 네이티브 확장 DLL이
+    # 이 프로세스 메모리에 로드된 채로 남음. status()가 6번 탭 열릴 때마다 이 함수를 불러서
+    # 설치 버튼을 누르기 전에 이미 항상 로드돼있는 상태가 되고, Windows는 로드된 DLL 파일을
+    # 다른 프로세스(pip)가 덮어쓰는 것도 막아서 설치가 "[WinError 5] 액세스가 거부되었습니다"로
+    # 실패함(사용자 보고). 별도 프로세스로 물어보면 이 프로세스는 torch를 전혀 로드하지 않으므로
+    # 이후 pip install이 파일을 자유롭게 덮어쓸 수 있음.
     try:
-        import torch
-        return bool(torch.cuda.is_available())
-    except Exception:  # noqa: BLE001 - torch import 실패도 "사용 불가"로 취급
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"],
+            capture_output=True, timeout=30)
+        return result.returncode == 0
+    except Exception:  # noqa: BLE001 - torch 없음/실행 실패 등도 "사용 불가"로 취급
         return False
 
 

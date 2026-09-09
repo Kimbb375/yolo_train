@@ -41,21 +41,20 @@ def check_dev_mode_skips() -> None:
 def check_already_cuda_available() -> None:
     previous_sha = appversion.COMMIT_SHA
     appversion.COMMIT_SHA = "deadbeef"
-    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: True))
-    sys.modules["torch"] = fake_torch
+    import subprocess
+    real_run = subprocess.run
+    subprocess.run = lambda *a, **k: types.SimpleNamespace(returncode=0)
     try:
         assert gpu_setup.ensure_cuda_torch(log=lambda *_: None) is True
     finally:
         appversion.COMMIT_SHA = previous_sha
-        del sys.modules["torch"]
+        subprocess.run = real_run
     print("OK: CUDA torch가 이미 있으면 설치 시도 없이 True.")
 
 
 def check_install_flow_and_retry_guard() -> None:
     previous_sha = appversion.COMMIT_SHA
     previous_executable = sys.executable
-    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
-    sys.modules["torch"] = fake_torch
     appversion.COMMIT_SHA = "deadbeef"
 
     logs: list[str] = []
@@ -68,6 +67,7 @@ def check_install_flow_and_retry_guard() -> None:
 
     import subprocess
     real_popen = subprocess.Popen
+    real_run = subprocess.run
     captured_args: list = []
 
     def _fake_popen(args, **k):
@@ -75,6 +75,7 @@ def check_install_flow_and_retry_guard() -> None:
         return _FakeProcess()
 
     subprocess.Popen = _fake_popen
+    subprocess.run = lambda *a, **k: types.SimpleNamespace(returncode=1)  # CUDA 없음
 
     with tempfile.TemporaryDirectory() as tmp:
         # 배포판 레이아웃: <배포 폴더>/python/pythonw.exe (venv Scripts/ 아님 - standalone CPython 통째 복사)
@@ -109,8 +110,8 @@ def check_install_flow_and_retry_guard() -> None:
         finally:
             sys.executable = previous_executable
             subprocess.Popen = real_popen
+            subprocess.run = real_run
             appversion.COMMIT_SHA = previous_sha
-            del sys.modules["torch"]
 
     print("OK: 첫 설치 시도 -> 마커 기록 -> 재시도 시 중복 설치 없이 스킵.")
 
@@ -121,8 +122,6 @@ def check_failed_install_allows_retry() -> None:
     # 안 되는 걸 막기 위한 회귀 테스트.
     previous_sha = appversion.COMMIT_SHA
     previous_executable = sys.executable
-    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
-    sys.modules["torch"] = fake_torch
     appversion.COMMIT_SHA = "deadbeef"
 
     class _FakeFailingProcess:
@@ -133,6 +132,7 @@ def check_failed_install_allows_retry() -> None:
 
     import subprocess
     real_popen = subprocess.Popen
+    real_run = subprocess.run
     call_count = {"n": 0}
 
     def _fake_popen(args, **k):
@@ -140,6 +140,7 @@ def check_failed_install_allows_retry() -> None:
         return _FakeFailingProcess()
 
     subprocess.Popen = _fake_popen
+    subprocess.run = lambda *a, **k: types.SimpleNamespace(returncode=1)  # CUDA 없음
 
     with tempfile.TemporaryDirectory() as tmp:
         os.makedirs(os.path.join(tmp, "python"), exist_ok=True)
@@ -155,8 +156,8 @@ def check_failed_install_allows_retry() -> None:
         finally:
             sys.executable = previous_executable
             subprocess.Popen = real_popen
+            subprocess.run = real_run
             appversion.COMMIT_SHA = previous_sha
-            del sys.modules["torch"]
 
     print("OK: 설치 실패(installed=False) 마커는 재시도를 막지 않음.")
 
