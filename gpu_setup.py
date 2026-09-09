@@ -89,15 +89,20 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
     log(f"[GPU] CUDA torch가 없어서 설치를 시작합니다 ({INDEX_URL}, 수 분 소요될 수 있음)...")
     ok = False
     try:
-        # --force-reinstall 없으면 pip이 "torch==2.13.0+cu126이 이미 설치돼 있음"으로 보고
+        # --ignore-installed 없으면 pip이 "torch==2.13.0+cu126이 이미 설치돼 있음"으로 보고
         # 아무것도 안 하고 성공 처리해버림 - 재설치 버튼을 눌러도(설치는 이미 한 번
         # installed=True로 기록된 상태) 실제로는 재다운로드가 전혀 안 일어나는 버그가 있었음
-        # (사용자 보고: "재설치 성공했다는데 재시작해도 여전히 CUDA 못 찾음"). --no-deps를
-        # 같이 줘서 torch/torchvision 본체만 다시 받고, numpy 등 의존 패키지는 안 건드림
-        # (--index-url이 일반 PyPI가 아니라 저 의존 패키지들을 못 찾아서 실패할 수 있음).
+        # (사용자 보고: "재설치 성공했다는데 재시작해도 여전히 CUDA 못 찾음"). 원래
+        # --force-reinstall을 썼는데, 이 옵션은 재설치 전에 기존 패키지를 uninstall하려고
+        # 시도함 - 포터블 배포판의 torch가 RECORD 파일 없이(정식 pip 설치 경로가 아니게)
+        # 깔려있으면 uninstall 자체가 "uninstall-no-record-file" 에러로 실패함(사용자 보고).
+        # --ignore-installed는 기존 설치를 건드리지 않고 그냥 덮어써서 uninstall 단계를
+        # 아예 안 거치므로 두 문제 다 해결됨. --no-deps를 같이 줘서 torch/torchvision 본체만
+        # 다시 받고, numpy 등 의존 패키지는 안 건드림(--index-url이 일반 PyPI가 아니라 저
+        # 의존 패키지들을 못 찾아서 실패할 수 있음).
         process = subprocess.Popen(
             [sys.executable, "-m", "pip", "install", "--break-system-packages",
-             "--force-reinstall", "--no-deps", "--no-cache-dir",
+             "--ignore-installed", "--no-deps", "--no-cache-dir",
              f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}",
              "--index-url", INDEX_URL],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
