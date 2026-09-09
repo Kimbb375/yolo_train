@@ -9,7 +9,7 @@ import sys
 import threading
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1382,8 +1382,16 @@ class InferenceTestTab(InferenceTab):
 
 class CandidateImageLabel(QLabel):
     """후보 크롭 이미지 표시 영역. 클릭해서 포커스를 줘야 A/D/Space/X 키가 먹음(§알아둘 것).
-    set_box()로 받은 박스(표시된 pixmap 픽셀 좌표)를 빨간 사각형으로 겹쳐 그림 - 저장된
-    후보 crop 이미지 자체엔 박스가 없고(원본 crop 그대로) 좌표만 따로 있어서 필요함."""
+    set_box()로 받은 박스(원본 이미지 픽셀 좌표)를 빨간 사각형으로 겹쳐 그림 - 저장된
+    후보 crop 이미지 자체엔 박스가 없고(원본 crop 그대로) 좌표만 따로 있어서 필요함.
+
+    QLabel의 기본 setPixmap()은 배율/이동을 지원 안 해서, 원본 이미지를 그대로 들고 있다가
+    paintEvent에서 매번 현재 배율/오프셋으로 직접 그림 - 그래야 마우스 휠 확대/축소를
+    QLabel 위에서 구현할 수 있음(사용자 요청: 포인터 위치 중심 확대/축소)."""
+
+    _ZOOM_STEP = 1.25
+    _MIN_ZOOM = 1.0
+    _MAX_ZOOM = 20.0
 
     def __init__(self) -> None:
         super().__init__("후보를 불러오세요.")
@@ -1391,12 +1399,25 @@ class CandidateImageLabel(QLabel):
         self.setMinimumSize(480, 480)
         self.setStyleSheet("background-color: #222; color: #ccc;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._image: Optional[QPixmap] = None
         self._box: Optional[tuple[float, float, float, float]] = None
         self._box_color = QColor("red")
+        self._zoom = 1.0
+        # None이면 "가운데 정렬(배율 1배)"을 매번 다시 계산함 - 확대(휠) 전까진 창 크기가
+        # 바뀌어도 항상 가운데 맞춰짐. 한 번 확대하면 그때부터는 사용자가 지정한 위치 고정.
+        self._offset: Optional[QPointF] = None
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         self.setFocus()
         super().mousePressEvent(event)
+
+    def set_image(self, pixmap: Optional[QPixmap]) -> None:
+        self._image = pixmap if (pixmap is not None and not pixmap.isNull()) else None
+        # QLabel 자체 pixmap 렌더링은 안 씀(paintEvent에서 직접 그림) - text만 QLabel한테 맡김.
+        self.setPixmap(QPixmap())
+        self._zoom = 1.0
+        self._offset = None
+        self.update()
 
     def set_box(self, box: Optional[tuple[float, float, float, float]],
                 color: Optional[QColor] = None) -> None:
@@ -1405,21 +1426,68 @@ class CandidateImageLabel(QLabel):
             self._box_color = color
         self.update()
 
+    def _fit_scale(self) -> float:
+        if self._image is None or self._image.width() <= 0 or self._image.height() <= 0:
+            return 1.0
+        return min(self.width() / self._image.width(), self.height() / self._image.height())
+
+    def _current_scale(self) -> float:
+        return self._fit_scale() * self._zoom
+
+    def _current_offset(self, scale: float) -> QPointF:
+        if self._image is None:
+            return QPointF(0.0, 0.0)
+        if self._offset is not None:
+            return self._offset
+        return QPointF((self.width() - self._image.width() * scale) / 2.0,
+                        (self.height() - self._image.height() * scale) / 2.0)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if self._image is None:
+            super().wheelEvent(event)
+            return
+        old_scale = self._current_scale()
+        old_offset = self._current_offset(old_scale)
+        mouse_pos = event.position()
+        # 휠 돌리는 지점의 "원본 이미지 좌표"를 먼저 구해두고, 배율 바꾼 뒤 그 좌표가 다시
+        # 마우스 밑에 오도록 오프셋을 역산 - 이게 "포인터 위치 중심 확대/축소".
+        image_point = QPointF((mouse_pos.x() - old_offset.x()) / old_scale,
+                               (mouse_pos.y() - old_offset.y()) / old_scale)
+
+        steps = event.angleDelta().y() / 120.0
+        new_zoom = min(self._MAX_ZOOM, max(self._MIN_ZOOM, self._zoom * (self._ZOOM_STEP ** steps)))
+        if new_zoom == self._zoom:
+            event.accept()
+            return
+        self._zoom = new_zoom
+        new_scale = self._current_scale()
+        if new_zoom <= self._MIN_ZOOM:
+            self._offset = None  # 배율 1배로 돌아오면 다시 자동 가운데 정렬 모드로.
+        else:
+            self._offset = QPointF(mouse_pos.x() - image_point.x() * new_scale,
+                                    mouse_pos.y() - image_point.y() * new_scale)
+        self.update()
+        event.accept()
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().paintEvent(event)
-        pixmap = self.pixmap()
-        if self._box is None or pixmap is None or pixmap.isNull():
+        if self._image is None:
             return
-        offset_x = (self.width() - pixmap.width()) / 2.0
-        offset_y = (self.height() - pixmap.height()) / 2.0
-        left, top, right, bottom = self._box
-        rect = QRect(round(offset_x + left), round(offset_y + top),
-                     round(right - left), round(bottom - top))
+        scale = self._current_scale()
+        offset = self._current_offset(scale)
         painter = QPainter(self)
-        pen = QPen(self._box_color)
-        pen.setWidth(2)
-        painter.setPen(pen)
-        painter.drawRect(rect)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        target_rect = QRectF(offset.x(), offset.y(),
+                              self._image.width() * scale, self._image.height() * scale)
+        painter.drawPixmap(target_rect, self._image, QRectF(self._image.rect()))
+        if self._box is not None:
+            left, top, right, bottom = self._box
+            rect = QRectF(offset.x() + left * scale, offset.y() + top * scale,
+                          (right - left) * scale, (bottom - top) * scale)
+            pen = QPen(self._box_color)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.drawRect(rect)
 
 
 class ReviewTab(QWidget):
@@ -1626,6 +1694,7 @@ class ReviewTab(QWidget):
 
         candidate = self._current()
         if candidate is None:
+            self.image_label.set_image(None)
             self.image_label.setText("표시할 후보가 없습니다.")
             self.image_label.set_box(None)
             self.info_label.setText("-")
@@ -1646,20 +1715,18 @@ class ReviewTab(QWidget):
         pixmap = QPixmap(image_path)
         if pixmap.isNull():
             self.image_label.setText(f"이미지를 불러올 수 없음: {image_path}")
+            self.image_label.set_image(None)
             self.image_label.set_box(None)
         else:
-            scaled = pixmap.scaled(
-                self.image_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation)
-            self.image_label.setPixmap(scaled)
+            # 원본 해상도 그대로 넘김 - CandidateImageLabel이 확대/축소 배율에 맞춰
+            # 매번 직접 그림(마우스 휠 확대/축소 지원을 위해 미리 축소해서 넘기지 않음).
+            self.image_label.set_image(pixmap)
             crop = candidate.candidateCropBox
             if crop.width > 0 and crop.height > 0:
                 box = candidate.globalBox
-                scale_x = scaled.width() / crop.width
-                scale_y = scaled.height() / crop.height
                 self.image_label.set_box((
-                    (box.left - crop.left) * scale_x, (box.top - crop.top) * scale_y,
-                    (box.right - crop.left) * scale_x, (box.bottom - crop.top) * scale_y), box_color)
+                    box.left - crop.left, box.top - crop.top,
+                    box.right - crop.left, box.bottom - crop.top), box_color)
             else:
                 self.image_label.set_box(None)
 
