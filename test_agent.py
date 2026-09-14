@@ -34,6 +34,28 @@ def check_tee_still_echoes_to_real_stdout_when_present() -> None:
     print("OK: real_stdout이 있으면 그대로 echo도 되면서 flush_callback도 호출됨 검증.")
 
 
+def check_resolve_output_root() -> None:
+    assert agent._resolve_output_root({"output": "C:\\explicit"}) == "C:\\explicit"
+
+    previous = agent._output_root_override
+    try:
+        agent._output_root_override = "C:\\default"
+        assert agent._resolve_output_root({"output": ""}) == "C:\\default"
+        assert agent._resolve_output_root({}) == "C:\\default"
+
+        agent._output_root_override = None
+        try:
+            agent._resolve_output_root({"output": ""})
+            raise AssertionError("output도 없고 기본 경로도 없으면 실패해야 함")
+        except ValueError:
+            pass
+    finally:
+        agent._output_root_override = previous
+
+    print("OK: 출력 폴더 결정 - 명시 output 우선, 없으면 워커 기본값, 둘 다 없으면 에러.")
+
+
 if __name__ == "__main__":
     check_tee_survives_none_real_stdout()
     check_tee_still_echoes_to_real_stdout_when_present()
+    check_resolve_output_root()

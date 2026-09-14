@@ -1045,8 +1045,28 @@ class InferenceTab(QWidget):
         gpu_row.addWidget(self.optimize_button)
         gpu_row.addStretch(1)
 
+        # 원격 대상일 때만 보임 - 워커의 기본 저장 경로(로컬)를 중앙에서 언제든 다시 지정함.
+        # 지정해두면 6번 탭 출력 폴더를 비워도 워커가 이 경로를 씀(agent._resolve_output_root).
+        self.worker_output_root_input = QLineEdit()
+        self.worker_output_root_input.setPlaceholderText("워커에 적용할 로컬 경로, 예: C:\\whale_output")
+        self.worker_output_root_apply_button = QPushButton("워커에 적용")
+        self.worker_output_root_apply_button.clicked.connect(self._on_apply_worker_output_root)
+        self.worker_output_root_status = QLabel("")
+        self.worker_output_root_status.setWordWrap(True)
+        self.worker_output_root_row = QWidget()
+        worker_output_root_layout = QVBoxLayout(self.worker_output_root_row)
+        worker_output_root_layout.setContentsMargins(0, 0, 0, 0)
+        worker_output_root_input_row = QHBoxLayout()
+        worker_output_root_input_row.addWidget(QLabel("워커 기본 저장 경로"))
+        worker_output_root_input_row.addWidget(self.worker_output_root_input, stretch=1)
+        worker_output_root_input_row.addWidget(self.worker_output_root_apply_button)
+        worker_output_root_layout.addLayout(worker_output_root_input_row)
+        worker_output_root_layout.addWidget(self.worker_output_root_status)
+        self.worker_output_root_row.setVisible(False)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.target_label)
+        layout.addWidget(self.worker_output_root_row)
         layout.addLayout(gpu_row)
         layout.addLayout(form)
         layout.addLayout(options_row)
@@ -1074,7 +1094,36 @@ class InferenceTab(QWidget):
         # 입력을 유도하는 쪽이 훨씬 단순하고 안정적임.
         self.output_input.setPlaceholderText(
             "" if agent_id is None else f"워커({agent_id})의 로컬 경로 직접 입력, 예: C:\\whale_output")
+        self.worker_output_root_row.setVisible(agent_id is not None)
+        if agent_id is not None:
+            self.worker_output_root_input.clear()
+            self._refresh_worker_output_root_status()
         self._render_target(agent_id)
+
+    def _refresh_worker_output_root_status(self) -> None:
+        agent_id = self._remote_agent_id
+        server = CONTROL_CONTEXT.server
+        if agent_id is None or server is None:
+            return
+        agents_by_id = {a["agentId"]: a for a in server.snapshot()["agents"]}
+        agent = agents_by_id.get(agent_id)
+        current = (agent or {}).get("outputRoot") or "(미설정 - 출력 폴더를 직접 지정해야 함)"
+        self.worker_output_root_status.setText(f"현재 워커 기본 저장 경로: {current}")
+
+    def _on_apply_worker_output_root(self) -> None:
+        agent_id = self._remote_agent_id
+        server = CONTROL_CONTEXT.server
+        if agent_id is None or server is None:
+            return
+        path = self.worker_output_root_input.text().strip()
+        if not path:
+            return
+        # 명령 큐에 넣기만 함(agent.py가 다음 폴링 때 - 최대 1초 - 받아서 적용/저장함).
+        # list_dir 폴링 브라우저처럼 응답을 기다리는 UI가 아니라 그냥 큐잉이라 훨씬 안정적임
+        # (5d1ba12에서 실시간 왕복이 필요한 원격 탐색은 불안정해서 제거한 적 있음).
+        server.queue_command(agent_id, {"type": "set_output_root", "path": path})
+        self.worker_output_root_status.setText(f"적용 요청 보냄: {path} (반영까지 1~2초)")
+        QTimer.singleShot(2000, self._refresh_worker_output_root_status)
 
     def _get_state(self, target_key: Optional[str]) -> _JobView:
         return self._states.setdefault(target_key, _JobView())
@@ -1146,7 +1195,9 @@ class InferenceTab(QWidget):
             QMessageBox.information(
                 self, "출력 폴더 (원격 실행)",
                 "이 버튼은 중앙 PC의 폴더만 보여줄 수 있어 워커 PC 경로 선택에는 쓸 수 없습니다.\n\n"
-                "출력 폴더 칸에 워커 PC의 로컬 경로를 직접 입력하세요 (예: C:\\whale_output).\n"
+                "위쪽 '워커 기본 저장 경로'에 워커 PC의 로컬 경로를 등록해두면(예: C:\\whale_output) "
+                "이 출력 폴더 칸은 비워둬도 됩니다. 직접 매번 지정하고 싶으면 여기에 워커 PC의 "
+                "로컬 경로를 입력해도 됩니다(그 경우 이 값이 우선 적용됨).\n"
                 "NAS 등 공유 경로일 필요 없습니다 - 작업이 끝나면 '중앙 저장 경로'(mirror) 설정을 "
                 "켜둔 경우 결과가 자동으로 이 PC에 복사됩니다.")
             return
@@ -1253,11 +1304,12 @@ class InferenceTab(QWidget):
         source = ";".join(self._selected_files) if self._selected_files else self.source_input.text().strip()
         model_path = self.model_input.text().strip()
         output_root = self.output_input.text().strip()
-        if not source or not model_path or not output_root:
+        target_key = self._remote_agent_id
+        # 원격 대상이면 출력 폴더를 비워둘 수 있음 - 워커에 등록해둔 기본 저장 경로를 그대로
+        # 씀(agent._resolve_output_root). 로컬 실행은 이 PC의 명시적 경로가 항상 필요함.
+        if not source or not model_path or (target_key is None and not output_root):
             self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
             return
-
-        target_key = self._remote_agent_id
         self._states[target_key] = _JobView()
         self._states[target_key].running = True
         self._line_buffer = ""
@@ -1286,6 +1338,10 @@ class InferenceTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
+        if not output_root:
+            self._route_incoming(
+                agent_id, "[안내] 출력 폴더를 비워뒀습니다 - 워커에 등록된 기본 저장 경로를 씁니다 "
+                "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 저장 경로'에서 먼저 지정하세요).")
         # 출력 폴더는 경고 대상에서 뺌 - 워커 로컬 디스크에 쓰고 끝나면 한 번에 압축해서
         # 중앙으로 올리는 게(중앙 저장 경로 + mirror) 오히려 권장 패턴임(매 파일 NAS 쓰기로
         # 인한 부하를 피하려는 것). 원본/모델은 워커가 실제로 "읽어야" 하니 경고 유지.
