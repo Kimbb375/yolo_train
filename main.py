@@ -1107,15 +1107,18 @@ class InferenceTab(QWidget):
         self.gpu_install_button.setEnabled(agent_id is None)
         self.tensorrt_install_button.setEnabled(agent_id is None)
         self.optimize_button.setEnabled(agent_id is None)
-        # 출력 폴더는 원격 실행이어도 NAS가 아니라 워커 PC 로컬 경로를 직접 입력해야 함
-        # (찾기... 버튼은 중앙 PC 탐색기라 워커 경로를 보여줄 수 없음 - _pick_output 참고).
-        # 예전에 워커 경로를 실시간으로 보여주는 커스텀 탐색 프로토콜(list_dir 폴링)을
-        # 시도했다가 연결 불안정/"경로를 못 찾음" 문제로 뺐음(5d1ba12) - placeholder로 직접
-        # 입력을 유도하는 쪽이 훨씬 단순하고 안정적임.
+        # 원격 대상이면 이 화면의 출력 폴더/모델 칸은 아예 안 씀(비활성화) - 항상 워커에
+        # 등록된 기본 경로를 씀. 예전엔 "비어있으면 기본값, 채워져 있으면 그 값 그대로"였는데,
+        # 사용자가 로컬 실행 때 쓰던 이 PC의 D: 경로가 그대로 남아있는 채로 원격 대상으로
+        # 전환해서 그 로컬 경로가 워커로 전송돼 WinError 3로 실패하는 사고가 남(사용자 보고).
+        # 아예 입력을 못 하게 막아서 헷갈릴 여지를 없앰 - 워커 경로는 항상 아래
+        # "워커 기본 저장/모델 경로"에서만 지정함.
+        self.output_input.setEnabled(agent_id is None)
+        self.model_input.setEnabled(agent_id is None)
         self.output_input.setPlaceholderText(
-            "" if agent_id is None else f"워커({agent_id})의 로컬 경로 직접 입력, 예: C:\\whale_output")
+            "" if agent_id is None else "아래 '워커 기본 저장 경로' 사용됨 (이 칸은 원격일 때 비활성)")
         self.model_input.setPlaceholderText(
-            "" if agent_id is None else f"워커({agent_id})의 로컬 pt 경로 직접 입력")
+            "" if agent_id is None else "아래 '워커 기본 모델 경로' 사용됨 (이 칸은 원격일 때 비활성)")
         self.worker_output_root_row.setVisible(agent_id is not None)
         self.worker_model_path_row.setVisible(agent_id is not None)
         if agent_id is not None:
@@ -1251,15 +1254,14 @@ class InferenceTab(QWidget):
 
     def _pick_model(self) -> None:
         if self._remote_agent_id is not None:
-            # 출력 폴더(_pick_output)와 같은 이유 - 이 버튼은 중앙 PC 파일만 보여줄 수 있어서
-            # 잘못 쓰면 모델도 NAS 공유 경로로 잡게 됨. 모델을 워커 로컬에 두면 중앙 PC는
-            # 파일 서빙 부담 없이 순수 컨트롤 역할만 하게 됨(사용자 요청).
+            # 이 버튼은 중앙 PC 파일만 보여줄 수 있어서 잘못 쓰면 모델을 중앙 PC의 로컬
+            # 경로로 잡게 됨 - 그 경로는 워커에서 못 찾음(WinError 3, 사용자 보고). 원격일 땐
+            # 이 칸 자체를 비활성화해서(_on_control_target_changed) 아예 못 쓰게 하고, 항상
+            # 워커에 등록된 기본 모델 경로만 씀 - 중앙 PC는 순수 컨트롤 역할만(사용자 요청).
             QMessageBox.information(
                 self, "모델 pt (원격 실행)",
-                "이 버튼은 중앙 PC의 파일만 보여줄 수 있어 워커 PC 경로 선택에는 쓸 수 없습니다.\n\n"
-                "위쪽 '워커 기본 모델 경로'에 워커 PC의 로컬 pt 경로를 등록해두면 이 모델 칸은 "
-                "비워둬도 됩니다. 직접 매번 지정하고 싶으면 여기에 워커 PC의 로컬 경로를 "
-                "입력해도 됩니다(그 경우 이 값이 우선 적용됨).")
+                "원격 실행에서는 이 칸이 비활성화돼 있고 항상 워커에 등록된 기본 모델 경로를 씁니다.\n\n"
+                "아래 '워커 기본 모델 경로'에 워커 PC의 로컬 pt 경로를 등록/변경하세요.")
             return
         path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
@@ -1267,17 +1269,12 @@ class InferenceTab(QWidget):
 
     def _pick_output(self) -> None:
         if self._remote_agent_id is not None:
-            # 이 버튼은 중앙 PC의 QFileDialog라 워커 PC 폴더 구조를 보여줄 수 없음(다른
-            # PC 파일시스템이라 애초에 안 보임) - 잘못 누르고 중앙 PC/NAS 경로를 그대로
-            # 골라버리면 결과가 다시 NAS 왕복 I/O로 느려짐(사용자 보고: 원격 추론이
-            # 12~13초짜리가 50초로 늘어남 - 원인이 출력 경로가 NAS였음). 대신 워커 PC의
-            # 로컬 경로를 직접 타이핑하도록 안내함.
+            # 모델(_pick_model)과 같은 이유 - 원격일 땐 이 칸이 비활성화돼 있고 항상 워커에
+            # 등록된 기본 저장 경로를 씀(사용자 보고: 로컬 경로가 그대로 전송돼 실패한 사고).
             QMessageBox.information(
                 self, "출력 폴더 (원격 실행)",
-                "이 버튼은 중앙 PC의 폴더만 보여줄 수 있어 워커 PC 경로 선택에는 쓸 수 없습니다.\n\n"
-                "위쪽 '워커 기본 저장 경로'에 워커 PC의 로컬 경로를 등록해두면(예: C:\\whale_output) "
-                "이 출력 폴더 칸은 비워둬도 됩니다. 직접 매번 지정하고 싶으면 여기에 워커 PC의 "
-                "로컬 경로를 입력해도 됩니다(그 경우 이 값이 우선 적용됨).\n"
+                "원격 실행에서는 이 칸이 비활성화돼 있고 항상 워커에 등록된 기본 저장 경로를 씁니다.\n\n"
+                "아래 '워커 기본 저장 경로'에 워커 PC의 로컬 경로를 등록/변경하세요(예: C:\\whale_output).\n"
                 "NAS 등 공유 경로일 필요 없습니다 - 작업이 끝나면 '중앙 저장 경로'(mirror) 설정을 "
                 "켜둔 경우 결과가 자동으로 이 PC에 복사됩니다.")
             return
@@ -1382,22 +1379,30 @@ class InferenceTab(QWidget):
 
     def _on_start_clicked(self) -> None:
         source = ";".join(self._selected_files) if self._selected_files else self.source_input.text().strip()
-        model_path = self.model_input.text().strip()
-        output_root = self.output_input.text().strip()
         target_key = self._remote_agent_id
-        # 원격 대상이면 출력 폴더/모델 pt를 둘 다 비워둘 수 있음 - 워커에 등록해둔 기본
-        # 경로를 그대로 씀(agent._resolve_output_root/_resolve_model_path). 로컬 실행은
-        # 이 PC의 명시적 경로가 항상 필요함(등록해둘 워커 자체가 없음).
-        if not source or (target_key is None and not model_path) or (target_key is None and not output_root):
-            self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
+        # 원격 대상이면 이 화면의 모델/출력 칸은 아예 안 씀(칸도 비활성화돼 있음 -
+        # _on_control_target_changed) - 항상 워커에 등록해둔 기본 경로를 그대로 씀
+        # (agent._resolve_output_root/_resolve_model_path). 로컬 실행은 이 PC의 명시적
+        # 경로가 항상 필요함(등록해둘 워커 자체가 없음). 예전엔 "채워져 있으면 그 값
+        # 우선"이었는데, 로컬 실행용으로 남아있던 이 PC의 경로가 그대로 워커로 전송돼
+        # WinError 3로 실패하는 사고가 있었음(사용자 보고) - 아예 안 읽는 걸로 바꿈.
+        if target_key is None:
+            model_path = self.model_input.text().strip()
+            output_root = self.output_input.text().strip()
+            if not source or not model_path or not output_root:
+                self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
+                return
+        elif not source:
+            self.summary_log.setPlainText("[오류] 원본 TIF를 지정하세요.")
             return
+
         self._states[target_key] = _JobView()
         self._states[target_key].running = True
         self._line_buffer = ""
         self._render_target(target_key)  # 화면(현재 보고 있는 대상=target_key) 비우고 진행바 리셋
 
         if target_key is not None:
-            self._start_remote(target_key, source, model_path, output_root)
+            self._start_remote(target_key, source)
             return
 
         self._route_incoming(None, "추론 시작...")
@@ -1409,7 +1414,7 @@ class InferenceTab(QWidget):
         self._worker.finished_error.connect(self._on_finished_error)
         self._worker.start()
 
-    def _start_remote(self, agent_id: str, source: str, model_path: str, output_root: str) -> None:
+    def _start_remote(self, agent_id: str, source: str) -> None:
         server = CONTROL_CONTEXT.server
         if server is None:
             self._route_incoming(agent_id, "[오류] 서버가 꺼져 있습니다.")
@@ -1419,28 +1424,18 @@ class InferenceTab(QWidget):
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
-        if not output_root:
+        self._route_incoming(
+            agent_id, "[안내] 모델/출력 경로는 이 화면 값을 안 쓰고 워커에 등록된 기본 경로를 씁니다 "
+            "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 저장/모델 경로'에서 먼저 지정하세요).")
+        # 원본만 검사함 - 워커가 실제로 "읽어야" 하는 건 원본뿐이고, 모델/출력은 항상
+        # 워커 로컬 등록값을 씀(위 안내).
+        if not _looks_like_network_path(source):
             self._route_incoming(
-                agent_id, "[안내] 출력 폴더를 비워뒀습니다 - 워커에 등록된 기본 저장 경로를 씁니다 "
-                "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 저장 경로'에서 먼저 지정하세요).")
-        if not model_path:
-            self._route_incoming(
-                agent_id, "[안내] 모델 pt를 비워뒀습니다 - 워커에 등록된 기본 모델 경로를 씁니다 "
-                "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 모델 경로'에서 먼저 지정하세요).")
-        # 출력 폴더/모델은 비워둔 경우 경고 대상에서 뺌(위 안내로 충분함). 명시적으로 값을
-        # 입력한 경우에만 검사함 - 원본은 워커가 항상 "읽어야" 하니 항상 검사, 모델은
-        # 워커 로컬 등록(위 안내) 또는 공유 경로 둘 다 정상 패턴이라 값 있을 때만 검사.
-        checks = [("원본 TIF", source)]
-        if model_path:
-            checks.append(("모델", model_path))
-        for label, path in checks:
-            if not _looks_like_network_path(path):
-                self._route_incoming(
-                    agent_id, f"[안내] {label} 경로('{path}')가 \\\\로 시작하는 공유(NAS/UNC) "
-                    "경로가 아닙니다 - 이 PC에만 있는 로컬 경로면 워커 PC에서 못 찾습니다 "
-                    "(WinError 3). 두 PC가 같이 보는 공유 폴더 경로를 쓰세요.")
+                agent_id, f"[안내] 원본 TIF 경로('{source}')가 \\\\로 시작하는 공유(NAS/UNC) "
+                "경로가 아닙니다 - 이 PC에만 있는 로컬 경로면 워커 PC에서 못 찾습니다 "
+                "(WinError 3). 두 PC가 같이 보는 공유 폴더 경로를 쓰세요.")
         server.queue_command(agent_id, {
-            "type": "start_job", "source": source, "model": model_path, "output": output_root,
+            "type": "start_job", "source": source, "model": "", "output": "",
             "runName": self.name_input.text().strip() or None, "options": self.options_input.text(),
             "mirror": bool(CONTROL_CONTEXT.central_output_root),
         })
