@@ -579,6 +579,20 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     if engine_path.is_file():
         return str(engine_path)
 
+    # TensorRT engine 빌드는 이 PC의 GPU/드라이버/TensorRT 버전 조합에 자체적으로 실패할 수
+    # 있음(네이티브 빌더 내부 문제라 코드로 못 고침 - Ultralytics도 상세 원인 없이 "check
+    # logs for errors"만 남김). 이 실패는 재시도해도 똑같이 실패하는데, ONNX export(수 초)
+    # + TRT 빌드 시도(수~수십 초)를 매 추론 실행마다 반복하며 같은 에러를 계속 찍는 낭비가
+    # 있었음(사용자 보고: 다른 PC에서 매번 이 에러가 뜸). engine_path와 같은 키(pt
+    # 크기/수정시각+imgsz+half+GPU 이름)로 실패 마커를 남겨서, 같은 조합이면 재시도 없이
+    # 바로 .pt 폴백하게 함 - .pt가 바뀌거나 GPU/옵션이 바뀌면 키가 달라져서 자동으로 다시 시도됨.
+    failed_marker = Path(str(engine_path) + ".failed")
+    if failed_marker.is_file():
+        reason = failed_marker.read_text(encoding="utf-8", errors="replace")[:300]
+        raise RuntimeError(
+            f"이전에 이 GPU/설정 조합으로 빌드가 실패해 재시도를 건너뜁니다 (원인: {reason}). "
+            f"드라이버/TensorRT를 갱신했다면 재시도하려면 이 파일을 지우세요: {failed_marker}")
+
     # 필요 패키지(onnx/onnxslim/onnxruntime-gpu/tensorrt) 설치 여부 확인/설치는 gpu_setup에
     # 공용으로 둠 - main.py의 "TensorRT 설치" 버튼(모델을 안 돌려도 미리 설치 가능)과 이 자동
     # 경로가 같은 로직/마커 파일을 공유함.
@@ -589,17 +603,24 @@ def _ensure_trt_engine(pt_path: str, imgsz: int, half: bool) -> str:
     from ultralytics import YOLO as _YOLO
     import shutil as _shutil
     print(f"[TensorRT] engine 변환 시작(최초 1회, 수 분 소요, imgsz={imgsz}, half={half})...", flush=True)
-    # .pt가 NAS/UNC 공유 경로(\\server\share\...)에 있으면 ultralytics가 중간 산출물인
-    # .onnx도 그 옆(같은 네트워크 경로)에 씀 - TensorRT의 onnx 로더가 UNC 경로나 특수/한글
-    # 문자가 섞인 경로를 못 읽어서 "failed to load ONNX file" 로 실패하는 사례가 있었음
-    # (사용자 보고). .pt를 이 PC 로컬(trt_cache 밑 임시 폴더)로 먼저 복사해서 export 전체를
-    # 로컬 경로 안에서만 진행하면 이 문제를 근본적으로 피할 수 있음.
-    with _tempfile.TemporaryDirectory(dir=str(cache_dir)) as tmp_dir:
-        local_pt = Path(tmp_dir) / pt.name
-        _shutil.copyfile(pt_path, local_pt)
-        exported = _YOLO(str(local_pt)).export(
-            format="engine", imgsz=imgsz, half=half, dynamic=True, batch=32, device=0)
-        Path(exported).replace(engine_path)
+    try:
+        # .pt가 NAS/UNC 공유 경로(\\server\share\...)에 있으면 ultralytics가 중간 산출물인
+        # .onnx도 그 옆(같은 네트워크 경로)에 씀 - TensorRT의 onnx 로더가 UNC 경로나 특수/한글
+        # 문자가 섞인 경로를 못 읽어서 "failed to load ONNX file" 로 실패하는 사례가 있었음
+        # (사용자 보고). .pt를 이 PC 로컬(trt_cache 밑 임시 폴더)로 먼저 복사해서 export 전체를
+        # 로컬 경로 안에서만 진행하면 이 문제를 근본적으로 피할 수 있음.
+        with _tempfile.TemporaryDirectory(dir=str(cache_dir)) as tmp_dir:
+            local_pt = Path(tmp_dir) / pt.name
+            _shutil.copyfile(pt_path, local_pt)
+            exported = _YOLO(str(local_pt)).export(
+                format="engine", imgsz=imgsz, half=half, dynamic=True, batch=32, device=0)
+            Path(exported).replace(engine_path)
+    except Exception as exc:
+        try:
+            failed_marker.write_text(str(exc), encoding="utf-8")
+        except OSError:
+            pass
+        raise
     print(f"[TensorRT] engine 준비 완료: {engine_path}", flush=True)
     return str(engine_path)
 
