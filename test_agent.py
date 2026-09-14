@@ -5,6 +5,7 @@ python test_agent.py 로 직접 실행.
 """
 
 import agent
+import inference
 
 
 def check_tee_survives_none_real_stdout() -> None:
@@ -76,8 +77,45 @@ def check_resolve_model_path() -> None:
     print("OK: 모델 pt 경로 결정 - 명시 model 우선, 없으면 워커 기본값, 둘 다 없으면 에러.")
 
 
+def check_run_job_forwards_output_and_done_locally() -> None:
+    # 워커 PC가 GUI로도 떠 있으면(main.py _AgentThread) 서버 /log,/done 전송과 별개로
+    # on_output/on_done 콜백을 통해 이 프로세스 안 InferenceTab에도 바로 보여줘야 함
+    # (사용자 요청: "워커 PC에서도 추론 페이지처럼 작업 도는 게 보이게").
+    class _FakeResult:
+        runRootPath = "run_root"
+
+        def to_display_text(self) -> str:
+            return "완료 메시지"
+
+    real_inference_run = inference.run
+    real_post = agent._post
+
+    def fake_inference_run(source, output, model, run_name, options):
+        print("hello from job", flush=True)
+        return _FakeResult()
+
+    inference.run = fake_inference_run
+    agent._post = lambda *a, **k: {}
+
+    outputs: list[str] = []
+    done: list[tuple] = []
+    try:
+        agent._run_job(
+            "http://central", "tok", "agentA",
+            {"type": "start_job", "source": "s", "output": "o", "model": "m", "options": ""},
+            on_output=outputs.append, on_done=lambda ok, msg: done.append((ok, msg)))
+    finally:
+        inference.run = real_inference_run
+        agent._post = real_post
+
+    assert any("hello from job" in line for line in outputs)
+    assert done == [(True, "완료 메시지")]
+    print("OK: _run_job이 on_output/on_done 콜백으로 서버 전송과 별개로 로컬에도 전달함.")
+
+
 if __name__ == "__main__":
     check_tee_survives_none_real_stdout()
     check_tee_still_echoes_to_real_stdout_when_present()
     check_resolve_output_root()
     check_resolve_model_path()
+    check_run_job_forwards_output_and_done_locally()

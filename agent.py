@@ -162,14 +162,24 @@ def _upload_result(server: str, token: str, agent_id: str, run_root: str) -> Non
     print("[Agent] 업로드 완료.", flush=True)
 
 
-def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
+def _run_job(server: str, token: str, agent_id: str, command: dict,
+             on_output=None, on_done=None) -> None:
     """job type별로 실제 작업을 실행함. inference/training 둘 다 print()로 진행 상황을
-    내보내므로 stdout을 여기서 한 번만 가로채서(_TeeToServer) 서버 /log 로 올림."""
+    내보내므로 stdout을 여기서 한 번만 가로채서(_TeeToServer) 서버 /log 로 올림.
+
+    on_output/on_done: 이 워커 PC 자체가 GUI로 떠 있는 경우(main.py의 "이 PC를 워커로
+    접속"), 서버로 보내는 것과 별개로 이 프로세스 안의 InferenceTab에도 같은 로그/완료를
+    바로 보여주기 위한 콜백(사용자 요청: "중앙 제어는 컨트롤만, 워커 PC에서도 추론
+    페이지처럼 작업 도는 게 보이게"). CLI(--agent)로 콘솔만 띄운 경우엔 None."""
     def send_lines(text: str) -> None:
         lines = [ln for ln in text.split("\n") if ln]
-        if lines:
-            with contextlib.suppress(Exception):
-                _post(server, token, "/log", {"agentId": agent_id, "lines": lines})
+        if not lines:
+            return
+        with contextlib.suppress(Exception):
+            _post(server, token, "/log", {"agentId": agent_id, "lines": lines})
+        if on_output is not None:
+            for line in lines:
+                on_output(line)
 
     real_stdout = sys.stdout
     sys.stdout = _TeeToServer(real_stdout, send_lines)
@@ -195,18 +205,25 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
     sys.stdout = real_stdout
     with contextlib.suppress(Exception):
         _post(server, token, "/done", {"agentId": agent_id, "ok": ok, "message": message})
+    if on_done is not None:
+        on_done(ok, message)
 
 
 def run_agent(server: str, token: str, agent_id: str,
               stop_event: Optional[threading.Event] = None, log=print,
-              output_root: Optional[str] = None, model_path: Optional[str] = None) -> None:
+              output_root: Optional[str] = None, model_path: Optional[str] = None,
+              on_job_started=None, on_job_output=None, on_job_done=None) -> None:
     """워커 루프 본체. CLI(--agent)에서도, main.py의 ControlPanel(GUI에서 "이 PC를 워커로
     접속" 버튼 -> QThread)에서도 이 함수 하나를 그대로 씀 - stop_event로 그만둘 수 있고,
     log 콜백으로 print 대신 GUI 쪽에 상태를 보낼 수 있음(기본값은 CLI 그대로 동작).
 
     output_root/model_path: --output-root/--model-path로 준 값이 있으면 그걸 기본값으로
     쓰고 저장함(다음 실행에도 유지). 없으면 지난번에 저장된 값을 그대로 불러옴(둘 다 없으면
-    매 작업마다 중앙에서 output/model을 명시해야 함)."""
+    매 작업마다 중앙에서 output/model을 명시해야 함).
+
+    on_job_started/on_job_output/on_job_done: 이 워커가 GUI로도 떠 있을 때(main.py) 실제
+    작업 진행 상황을 이 프로세스 안 InferenceTab에도 그대로 보여주기 위한 콜백 - CLI로만
+    쓰면 None(기본 동작 그대로)."""
     global _output_root_override, _model_path_override
     _output_root_override = output_root or _load_output_root_override()
     if output_root:
@@ -243,7 +260,7 @@ def run_agent(server: str, token: str, agent_id: str,
 
     def run_job_in_background(command: dict) -> None:
         try:
-            _run_job(server, token, agent_id, command)
+            _run_job(server, token, agent_id, command, on_output=on_job_output, on_done=on_job_done)
         finally:
             busy_event.clear()
 
@@ -279,6 +296,8 @@ def run_agent(server: str, token: str, agent_id: str,
         if command and command.get("type") in ("start_job", "start_training"):
             label = command.get("runName") or command.get("name") or "(자동 이름)"
             log(f"[Agent] 작업 수신: {label}")
+            if on_job_started is not None:
+                on_job_started(label)
             busy_event.set()
             job_started_at[0] = time.time()
             threading.Thread(target=run_job_in_background, args=(command,), daemon=True).start()

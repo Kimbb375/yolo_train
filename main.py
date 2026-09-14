@@ -1069,7 +1069,32 @@ class InferenceTab(QWidget):
         layout.addWidget(self.progress_bar)
         layout.addWidget(log_split, stretch=1)
 
+        # 이 PC가 "워커로 접속"돼서 실제로 작업을 실행하면(ControlPanel._on_worker_connect_clicked),
+        # 로컬 실행("이 PC")과 똑같은 화면에 그 진행 상황을 그대로 보여줌 - 새 화면을 안 만들고
+        # 기존 로컬 뷰(target_key=None)를 재사용함(사용자 요청: "워커 PC에서도 추론 페이지처럼
+        # 작업 도는 게 보이게, 중앙 제어는 컨트롤만").
+        CONTROL_CONTEXT.worker_job_started.connect(self._on_worker_job_started)
+        CONTROL_CONTEXT.worker_job_output.connect(self._on_worker_job_output)
+        CONTROL_CONTEXT.worker_job_done.connect(self._on_worker_job_done)
+
         self._on_control_target_changed(CONTROL_CONTEXT.selected_agent_id)
+
+    def _on_worker_job_started(self, label: str) -> None:
+        self._states[None] = _JobView()
+        self._states[None].running = True
+        self._line_buffer = ""
+        if self._remote_agent_id is None:
+            self._render_target(None)
+        self._route_incoming(None, f"[워커] 작업 시작: {label}")
+
+    def _on_worker_job_output(self, line: str) -> None:
+        self._route_incoming(None, line)
+
+    def _on_worker_job_done(self, ok: bool, message: str) -> None:
+        self._route_incoming(None, ("[워커] 완료: " if ok else "[워커] 실패: ") + message)
+        self._get_state(None).running = False
+        if self._remote_agent_id is None:
+            self.start_button.setEnabled(True)
 
     def _on_control_target_changed(self, agent_id: Optional[str]) -> None:
         self._remote_agent_id = agent_id
@@ -2641,6 +2666,14 @@ class ControlContext(QObject):
 
     target_changed = Signal(object)  # agent_id: str 또는 None(로컬 = 이 PC 자신)
 
+    # 이 PC가 "워커로 접속"돼서 실제로 작업을 실행 중일 때, InferenceTab이 로컬 실행과
+    # 똑같은 화면(Summary/Load/Infer 로그 + 진행바)에 그 진행 상황을 보여주기 위한 신호.
+    # _AgentThread(워커 스레드)가 emit하고 ControlPanel이 여기로 릴레이함 - 사용자 요청:
+    # "중앙 제어는 컨트롤만 하고, 워커 PC에서도 추론 페이지처럼 작업 도는 게 보이게".
+    worker_job_started = Signal(str)  # label
+    worker_job_output = Signal(str)  # 한 줄
+    worker_job_done = Signal(bool, str)  # ok, message
+
     def __init__(self) -> None:
         super().__init__()
         self.server: Optional[controlserver.ControlServer] = None
@@ -2661,6 +2694,9 @@ class _AgentThread(QThread):
     별도로 --agent 커맨드라인을 띄울 필요 없음(그 방식도 여전히 됨, agent.py는 안 바뀜)."""
 
     status_changed = Signal(str)
+    job_started = Signal(str)
+    job_output = Signal(str)
+    job_done = Signal(bool, str)
 
     def __init__(self, server: str, token: str, agent_id: str) -> None:
         super().__init__()
@@ -2672,8 +2708,10 @@ class _AgentThread(QThread):
     def run(self) -> None:
         import agent as agent_module
         try:
-            agent_module.run_agent(self._server, self._token, self._agent_id,
-                                    stop_event=self._stop_event, log=self.status_changed.emit)
+            agent_module.run_agent(
+                self._server, self._token, self._agent_id, stop_event=self._stop_event,
+                log=self.status_changed.emit, on_job_started=self.job_started.emit,
+                on_job_output=self.job_output.emit, on_job_done=self.job_done.emit)
         except Exception as exc:  # noqa: BLE001 - 접속 스레드 죽는 대신 상태 라벨에 표시
             self.status_changed.emit(f"[오류] {exc}")
 
@@ -2848,6 +2886,12 @@ class ControlPanel(QWidget):
 
         self._agent_thread = _AgentThread(server_url, token, agent_id)
         self._agent_thread.status_changed.connect(self.worker_status_label.setText)
+        # InferenceTab(6번 탭)이 이 신호들을 구독해서, 이 PC가 워커로 작업을 받으면 로컬
+        # 실행("이 PC")과 똑같은 화면(Summary/Load/Infer 로그 + 진행바)에 그대로 표시함
+        # (사용자 요청: "중앙 제어는 컨트롤만, 워커 PC에서도 추론 페이지처럼 보이게").
+        self._agent_thread.job_started.connect(CONTROL_CONTEXT.worker_job_started.emit)
+        self._agent_thread.job_output.connect(CONTROL_CONTEXT.worker_job_output.emit)
+        self._agent_thread.job_done.connect(CONTROL_CONTEXT.worker_job_done.emit)
         self._agent_thread.finished.connect(self._on_agent_thread_finished)
         self._agent_thread.start()
         self.worker_connect_button.setText("접속 해제")
