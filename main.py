@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QGroupBox,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -1066,6 +1067,13 @@ class InferenceTab(QWidget):
         self.gpu_install_button.setEnabled(agent_id is None)
         self.tensorrt_install_button.setEnabled(agent_id is None)
         self.optimize_button.setEnabled(agent_id is None)
+        # 출력 폴더는 원격 실행이어도 NAS가 아니라 워커 PC 로컬 경로를 직접 입력해야 함
+        # (찾기... 버튼은 중앙 PC 탐색기라 워커 경로를 보여줄 수 없음 - _pick_output 참고).
+        # 예전에 워커 경로를 실시간으로 보여주는 커스텀 탐색 프로토콜(list_dir 폴링)을
+        # 시도했다가 연결 불안정/"경로를 못 찾음" 문제로 뺐음(5d1ba12) - placeholder로 직접
+        # 입력을 유도하는 쪽이 훨씬 단순하고 안정적임.
+        self.output_input.setPlaceholderText(
+            "" if agent_id is None else f"워커({agent_id})의 로컬 경로 직접 입력, 예: C:\\whale_output")
         self._render_target(agent_id)
 
     def _get_state(self, target_key: Optional[str]) -> _JobView:
@@ -1129,6 +1137,19 @@ class InferenceTab(QWidget):
             self.model_input.setText(path)
 
     def _pick_output(self) -> None:
+        if self._remote_agent_id is not None:
+            # 이 버튼은 중앙 PC의 QFileDialog라 워커 PC 폴더 구조를 보여줄 수 없음(다른
+            # PC 파일시스템이라 애초에 안 보임) - 잘못 누르고 중앙 PC/NAS 경로를 그대로
+            # 골라버리면 결과가 다시 NAS 왕복 I/O로 느려짐(사용자 보고: 원격 추론이
+            # 12~13초짜리가 50초로 늘어남 - 원인이 출력 경로가 NAS였음). 대신 워커 PC의
+            # 로컬 경로를 직접 타이핑하도록 안내함.
+            QMessageBox.information(
+                self, "출력 폴더 (원격 실행)",
+                "이 버튼은 중앙 PC의 폴더만 보여줄 수 있어 워커 PC 경로 선택에는 쓸 수 없습니다.\n\n"
+                "출력 폴더 칸에 워커 PC의 로컬 경로를 직접 입력하세요 (예: C:\\whale_output).\n"
+                "NAS 등 공유 경로일 필요 없습니다 - 작업이 끝나면 '중앙 저장 경로'(mirror) 설정을 "
+                "켜둔 경우 결과가 자동으로 이 PC에 복사됩니다.")
+            return
         path = QFileDialog.getExistingDirectory(self, "출력 폴더 선택")
         if path:
             self.output_input.setText(path)
