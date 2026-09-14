@@ -3023,10 +3023,41 @@ def main() -> int:
 
     banner.apply_requested.connect(_on_apply_update)
 
-    update_worker = BackgroundCallWorker(updatecheck.check_for_update)
-    update_worker.finished_ok.connect(_on_update_checked)
-    window._update_worker = update_worker  # QThread가 GC되지 않게 참조 유지
-    update_worker.start()
+    # 배너는 새 버전이 있을 때만 나타나서, 평소엔 "지금 버전이 뭔지/최신인지"를 알 방법이
+    # 없었음 - 상태 표시줄에 작은 버전 라벨 + "업데이트 확인" 버튼을 상시 둬서 언제든 수동
+    # 확인도 가능하게 함(사용자 요청: "업데이트 체크칸을 작게, 적절한 사이즈와 위치로").
+    status_bar = window.statusBar()
+    version_status_label = QLabel(f"버전: {version_label}")
+    check_update_button = QPushButton("업데이트 확인")
+    check_update_button.setMaximumWidth(90)
+    status_bar.addPermanentWidget(version_status_label)
+    status_bar.addPermanentWidget(check_update_button)
+
+    def _run_update_check(manual: bool) -> None:
+        if manual:
+            check_update_button.setEnabled(False)
+            version_status_label.setText(f"버전: {version_label} (확인 중...)")
+        worker = BackgroundCallWorker(updatecheck.check_for_update)
+
+        def _handle(info: Optional[dict]) -> None:
+            _on_update_checked(info)
+            if manual:
+                check_update_button.setEnabled(True)
+                version_status_label.setText(
+                    f"버전: {version_label}" + ("" if info else " (최신 버전)"))
+
+        def _handle_error(exc: Exception) -> None:
+            if manual:
+                check_update_button.setEnabled(True)
+                version_status_label.setText(f"버전: {version_label} (확인 실패: {exc})")
+
+        worker.finished_ok.connect(_handle)
+        worker.finished_error.connect(_handle_error)
+        window._update_worker = worker  # QThread가 GC되지 않게 참조 유지
+        worker.start()
+
+    check_update_button.clicked.connect(lambda: _run_update_check(manual=True))
+    _run_update_check(manual=False)
 
     return app.exec()
 
