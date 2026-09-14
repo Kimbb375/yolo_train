@@ -55,7 +55,29 @@ def check_resolve_output_root() -> None:
     print("OK: 출력 폴더 결정 - 명시 output 우선, 없으면 워커 기본값, 둘 다 없으면 에러.")
 
 
+def check_resolve_model_path() -> None:
+    assert agent._resolve_model_path({"model": "C:\\explicit.pt"}) == "C:\\explicit.pt"
+
+    previous = agent._model_path_override
+    try:
+        agent._model_path_override = "C:\\default.pt"
+        assert agent._resolve_model_path({"model": ""}) == "C:\\default.pt"
+        assert agent._resolve_model_path({}) == "C:\\default.pt"
+
+        agent._model_path_override = None
+        try:
+            agent._resolve_model_path({"model": ""})
+            raise AssertionError("model도 없고 기본 경로도 없으면 실패해야 함")
+        except ValueError:
+            pass
+    finally:
+        agent._model_path_override = previous
+
+    print("OK: 모델 pt 경로 결정 - 명시 model 우선, 없으면 워커 기본값, 둘 다 없으면 에러.")
+
+
 if __name__ == "__main__":
     check_tee_survives_none_real_stdout()
     check_tee_still_echoes_to_real_stdout_when_present()
     check_resolve_output_root()
+    check_resolve_model_path()

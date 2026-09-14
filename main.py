@@ -1045,28 +1045,23 @@ class InferenceTab(QWidget):
         gpu_row.addWidget(self.optimize_button)
         gpu_row.addStretch(1)
 
-        # 원격 대상일 때만 보임 - 워커의 기본 저장 경로(로컬)를 중앙에서 언제든 다시 지정함.
-        # 지정해두면 6번 탭 출력 폴더를 비워도 워커가 이 경로를 씀(agent._resolve_output_root).
-        self.worker_output_root_input = QLineEdit()
-        self.worker_output_root_input.setPlaceholderText("워커에 적용할 로컬 경로, 예: C:\\whale_output")
-        self.worker_output_root_apply_button = QPushButton("워커에 적용")
-        self.worker_output_root_apply_button.clicked.connect(self._on_apply_worker_output_root)
-        self.worker_output_root_status = QLabel("")
-        self.worker_output_root_status.setWordWrap(True)
-        self.worker_output_root_row = QWidget()
-        worker_output_root_layout = QVBoxLayout(self.worker_output_root_row)
-        worker_output_root_layout.setContentsMargins(0, 0, 0, 0)
-        worker_output_root_input_row = QHBoxLayout()
-        worker_output_root_input_row.addWidget(QLabel("워커 기본 저장 경로"))
-        worker_output_root_input_row.addWidget(self.worker_output_root_input, stretch=1)
-        worker_output_root_input_row.addWidget(self.worker_output_root_apply_button)
-        worker_output_root_layout.addLayout(worker_output_root_input_row)
-        worker_output_root_layout.addWidget(self.worker_output_root_status)
-        self.worker_output_root_row.setVisible(False)
+        # 원격 대상일 때만 보임 - 워커의 기본 저장 경로/모델 경로(둘 다 로컬)를 중앙에서
+        # 언제든 다시 지정함. 지정해두면 6번 탭 출력 폴더/모델 pt 칸을 비워도 워커가 이
+        # 경로를 씀(agent._resolve_output_root / _resolve_model_path) - "중앙 PC는 컨트롤만
+        # 하고, 모델도 워커 로컬에서 읽어야 GPU/CPU를 중앙이 안 쓴다"는 사용자 요청.
+        (self.worker_output_root_row, self.worker_output_root_input,
+         self.worker_output_root_apply_button, self.worker_output_root_status) = self._build_worker_path_row(
+            "워커 기본 저장 경로", "워커에 적용할 로컬 경로, 예: C:\\whale_output",
+            self._on_apply_worker_output_root)
+        (self.worker_model_path_row, self.worker_model_path_input,
+         self.worker_model_path_apply_button, self.worker_model_path_status) = self._build_worker_path_row(
+            "워커 기본 모델 경로", "워커에 적용할 로컬 pt 경로, 예: C:\\whale_models\\best.pt",
+            self._on_apply_worker_model_path)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.target_label)
         layout.addWidget(self.worker_output_root_row)
+        layout.addWidget(self.worker_model_path_row)
         layout.addLayout(gpu_row)
         layout.addLayout(form)
         layout.addLayout(options_row)
@@ -1094,11 +1089,38 @@ class InferenceTab(QWidget):
         # 입력을 유도하는 쪽이 훨씬 단순하고 안정적임.
         self.output_input.setPlaceholderText(
             "" if agent_id is None else f"워커({agent_id})의 로컬 경로 직접 입력, 예: C:\\whale_output")
+        self.model_input.setPlaceholderText(
+            "" if agent_id is None else f"워커({agent_id})의 로컬 pt 경로 직접 입력")
         self.worker_output_root_row.setVisible(agent_id is not None)
+        self.worker_model_path_row.setVisible(agent_id is not None)
         if agent_id is not None:
             self.worker_output_root_input.clear()
+            self.worker_model_path_input.clear()
             self._refresh_worker_output_root_status()
+            self._refresh_worker_model_path_status()
         self._render_target(agent_id)
+
+    @staticmethod
+    def _build_worker_path_row(label_text: str, placeholder: str, on_apply) -> tuple:
+        """"워커 기본 저장 경로"/"워커 기본 모델 경로" 행은 UI/동작이 완전히 동일한 패턴이라
+        (입력창+적용 버튼+현재값 라벨, 원격 대상일 때만 보임) 공용으로 뺌."""
+        path_input = QLineEdit()
+        path_input.setPlaceholderText(placeholder)
+        apply_button = QPushButton("워커에 적용")
+        apply_button.clicked.connect(on_apply)
+        status_label = QLabel("")
+        status_label.setWordWrap(True)
+        row = QWidget()
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel(label_text))
+        input_row.addWidget(path_input, stretch=1)
+        input_row.addWidget(apply_button)
+        row_layout.addLayout(input_row)
+        row_layout.addWidget(status_label)
+        row.setVisible(False)
+        return row, path_input, apply_button, status_label
 
     def _refresh_worker_output_root_status(self) -> None:
         agent_id = self._remote_agent_id
@@ -1124,6 +1146,28 @@ class InferenceTab(QWidget):
         server.queue_command(agent_id, {"type": "set_output_root", "path": path})
         self.worker_output_root_status.setText(f"적용 요청 보냄: {path} (반영까지 1~2초)")
         QTimer.singleShot(2000, self._refresh_worker_output_root_status)
+
+    def _refresh_worker_model_path_status(self) -> None:
+        agent_id = self._remote_agent_id
+        server = CONTROL_CONTEXT.server
+        if agent_id is None or server is None:
+            return
+        agents_by_id = {a["agentId"]: a for a in server.snapshot()["agents"]}
+        agent = agents_by_id.get(agent_id)
+        current = (agent or {}).get("modelPath") or "(미설정 - 모델 pt를 직접 지정해야 함)"
+        self.worker_model_path_status.setText(f"현재 워커 기본 모델 경로: {current}")
+
+    def _on_apply_worker_model_path(self) -> None:
+        agent_id = self._remote_agent_id
+        server = CONTROL_CONTEXT.server
+        if agent_id is None or server is None:
+            return
+        path = self.worker_model_path_input.text().strip()
+        if not path:
+            return
+        server.queue_command(agent_id, {"type": "set_model_path", "path": path})
+        self.worker_model_path_status.setText(f"적용 요청 보냄: {path} (반영까지 1~2초)")
+        QTimer.singleShot(2000, self._refresh_worker_model_path_status)
 
     def _get_state(self, target_key: Optional[str]) -> _JobView:
         return self._states.setdefault(target_key, _JobView())
@@ -1181,6 +1225,17 @@ class InferenceTab(QWidget):
         return f"{label}번부터 총 {len(names)}개 tif 선택됨"
 
     def _pick_model(self) -> None:
+        if self._remote_agent_id is not None:
+            # 출력 폴더(_pick_output)와 같은 이유 - 이 버튼은 중앙 PC 파일만 보여줄 수 있어서
+            # 잘못 쓰면 모델도 NAS 공유 경로로 잡게 됨. 모델을 워커 로컬에 두면 중앙 PC는
+            # 파일 서빙 부담 없이 순수 컨트롤 역할만 하게 됨(사용자 요청).
+            QMessageBox.information(
+                self, "모델 pt (원격 실행)",
+                "이 버튼은 중앙 PC의 파일만 보여줄 수 있어 워커 PC 경로 선택에는 쓸 수 없습니다.\n\n"
+                "위쪽 '워커 기본 모델 경로'에 워커 PC의 로컬 pt 경로를 등록해두면 이 모델 칸은 "
+                "비워둬도 됩니다. 직접 매번 지정하고 싶으면 여기에 워커 PC의 로컬 경로를 "
+                "입력해도 됩니다(그 경우 이 값이 우선 적용됨).")
+            return
         path, _ = QFileDialog.getOpenFileName(self, "모델 pt 선택", "", "PyTorch model (*.pt)")
         if path:
             self.model_input.setText(path)
@@ -1305,9 +1360,10 @@ class InferenceTab(QWidget):
         model_path = self.model_input.text().strip()
         output_root = self.output_input.text().strip()
         target_key = self._remote_agent_id
-        # 원격 대상이면 출력 폴더를 비워둘 수 있음 - 워커에 등록해둔 기본 저장 경로를 그대로
-        # 씀(agent._resolve_output_root). 로컬 실행은 이 PC의 명시적 경로가 항상 필요함.
-        if not source or not model_path or (target_key is None and not output_root):
+        # 원격 대상이면 출력 폴더/모델 pt를 둘 다 비워둘 수 있음 - 워커에 등록해둔 기본
+        # 경로를 그대로 씀(agent._resolve_output_root/_resolve_model_path). 로컬 실행은
+        # 이 PC의 명시적 경로가 항상 필요함(등록해둘 워커 자체가 없음).
+        if not source or (target_key is None and not model_path) or (target_key is None and not output_root):
             self.summary_log.setPlainText("[오류] 원본 TIF, 모델, 출력 폴더를 모두 지정하세요.")
             return
         self._states[target_key] = _JobView()
@@ -1342,10 +1398,17 @@ class InferenceTab(QWidget):
             self._route_incoming(
                 agent_id, "[안내] 출력 폴더를 비워뒀습니다 - 워커에 등록된 기본 저장 경로를 씁니다 "
                 "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 저장 경로'에서 먼저 지정하세요).")
-        # 출력 폴더는 경고 대상에서 뺌 - 워커 로컬 디스크에 쓰고 끝나면 한 번에 압축해서
-        # 중앙으로 올리는 게(중앙 저장 경로 + mirror) 오히려 권장 패턴임(매 파일 NAS 쓰기로
-        # 인한 부하를 피하려는 것). 원본/모델은 워커가 실제로 "읽어야" 하니 경고 유지.
-        for label, path in (("원본 TIF", source), ("모델", model_path)):
+        if not model_path:
+            self._route_incoming(
+                agent_id, "[안내] 모델 pt를 비워뒀습니다 - 워커에 등록된 기본 모델 경로를 씁니다 "
+                "(미등록이면 이 작업은 실패합니다. 위쪽 '워커 기본 모델 경로'에서 먼저 지정하세요).")
+        # 출력 폴더/모델은 비워둔 경우 경고 대상에서 뺌(위 안내로 충분함). 명시적으로 값을
+        # 입력한 경우에만 검사함 - 원본은 워커가 항상 "읽어야" 하니 항상 검사, 모델은
+        # 워커 로컬 등록(위 안내) 또는 공유 경로 둘 다 정상 패턴이라 값 있을 때만 검사.
+        checks = [("원본 TIF", source)]
+        if model_path:
+            checks.append(("모델", model_path))
+        for label, path in checks:
             if not _looks_like_network_path(path):
                 self._route_incoming(
                     agent_id, f"[안내] {label} 경로('{path}')가 \\\\로 시작하는 공유(NAS/UNC) "

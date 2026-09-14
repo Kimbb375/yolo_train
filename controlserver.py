@@ -40,6 +40,7 @@ class AgentState:
     hostname: str = ""
     gpu: str = ""
     outputRoot: str = ""
+    modelPath: str = ""
     lastSeen: float = 0.0
     currentJob: Optional[dict] = None
     progress: str = ""
@@ -91,15 +92,18 @@ class ControlServer:
         except (zipfile.BadZipFile, OSError, ValueError):
             return False
 
-    def register(self, agent_id: str, hostname: str, gpu: str, output_root: str = "") -> None:
+    def register(self, agent_id: str, hostname: str, gpu: str,
+                 output_root: str = "", model_path: str = "") -> None:
         with self._lock:
             state = self._agents.setdefault(agent_id, AgentState(agentId=agent_id))
             state.hostname = hostname
             state.gpu = gpu
             state.outputRoot = output_root
+            state.modelPath = model_path
             state.lastSeen = time.time()
 
-    def heartbeat(self, agent_id: str, progress: str, output_root: Optional[str] = None) -> None:
+    def heartbeat(self, agent_id: str, progress: str,
+                  output_root: Optional[str] = None, model_path: Optional[str] = None) -> None:
         with self._lock:
             state = self._agents.setdefault(agent_id, AgentState(agentId=agent_id))
             state.lastSeen = time.time()
@@ -107,6 +111,8 @@ class ControlServer:
                 state.progress = progress
             if output_root is not None:
                 state.outputRoot = output_root
+            if model_path is not None:
+                state.modelPath = model_path
 
     def unregister(self, agent_id: str) -> None:
         """워커가 "접속 해제"로 스스로 끊을 때 호출됨 - lastSeen을 0으로 눌러서 snapshot()의
@@ -156,7 +162,7 @@ class ControlServer:
                 "agents": [
                     {
                         "agentId": s.agentId, "hostname": s.hostname, "gpu": s.gpu,
-                        "outputRoot": s.outputRoot,
+                        "outputRoot": s.outputRoot, "modelPath": s.modelPath,
                         "online": (now - s.lastSeen) < ONLINE_TIMEOUT_SECONDS,
                         "currentJob": s.currentJob, "progress": s.progress,
                         # 컨트롤러 쪽이 이 리스트를 인덱스 기반으로 증분 표시하므로(main.py
@@ -216,13 +222,14 @@ class ControlServer:
                     data = self._read_json()
                     if self.path == "/register":
                         server.register(data["agentId"], data.get("hostname", ""), data.get("gpu", ""),
-                                         data.get("outputRoot", ""))
+                                         data.get("outputRoot", ""), data.get("modelPath", ""))
                         self._send_json(200, {"ok": True})
                     elif self.path == "/unregister":
                         server.unregister(data["agentId"])
                         self._send_json(200, {"ok": True})
                     elif self.path == "/poll":
-                        server.heartbeat(data["agentId"], data.get("progress", ""), data.get("outputRoot"))
+                        server.heartbeat(data["agentId"], data.get("progress", ""),
+                                          data.get("outputRoot"), data.get("modelPath"))
                         # 에이전트가 이미 작업 중이면(busy=True) 명령을 꺼내주지 않음 - 큐에서
                         # 그냥 뽑아버리면(take_command) 처리 못 하고 유실됨. 계속 대기시킴.
                         command = None if data.get("busy") else server.take_command(data["agentId"])

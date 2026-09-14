@@ -31,34 +31,53 @@ import training
 # 높임. LAN 안에서 JSON 몇 바이트 주고받는 정도라 1초로 줄여도 부담 적음.
 POLL_INTERVAL_SECONDS = 1.0
 
-# 이 워커의 기본 출력 폴더(로컬 경로). 작업 명령에 output이 안 왔을 때 씀 - 중앙 PC가
-# 원격 출력 경로를 매번 NAS로 잡아버리는 문제(사용자 보고: 이미지당 12~13초가 50초로
-# 느려짐, 원인은 출력이 NAS를 왕복하는 I/O였음) 때문에, 워커 로컬 경로를 한 번 등록해두고
-# 재사용하려는 것. 중앙 PC가 "set_output_root" 명령으로 언제든 다시 지정할 수 있음.
+# 이 워커의 기본 출력 폴더/모델 pt 경로(둘 다 로컬 경로). 작업 명령에 output/model이 안
+# 왔을 때 씀 - 중앙 PC가 원격 출력/모델 경로를 매번 NAS로 잡아버리면(출력: 사용자 보고
+# 이미지당 12~13초가 50초로 느려짐 / 모델: 중앙 PC가 그 NAS를 직접 호스팅하면 중앙 PC의
+# 디스크·네트워크 자원까지 쓰게 됨 - "중앙 PC는 컨트롤만 하고 싶다"는 사용자 요청) 때문에,
+# 워커 로컬 경로를 한 번 등록해두고 재사용하려는 것. 중앙 PC가 "set_output_root"/
+# "set_model_path" 명령으로 언제든 다시 지정할 수 있음.
 _output_root_override: Optional[str] = None
+_model_path_override: Optional[str] = None
 
 
-def _output_root_config_path() -> str:
-    return os.path.join(os.path.dirname(sys.executable), "_agent_output_root.json")
+def _agent_config_path(name: str) -> str:
+    return os.path.join(os.path.dirname(sys.executable), f"_agent_{name}.json")
 
 
-def _load_output_root_override() -> Optional[str]:
-    path = _output_root_config_path()
+def _load_agent_config(name: str, key: str) -> Optional[str]:
+    path = _agent_config_path(name)
     if not os.path.isfile(path):
         return None
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh).get("outputRoot") or None
+            return json.load(fh).get(key) or None
     except Exception:  # noqa: BLE001 - 설정 파일 손상 시 미설정 취급
         return None
 
 
-def _save_output_root_override(path: str) -> None:
+def _save_agent_config(name: str, key: str, value: str) -> None:
     try:
-        with open(_output_root_config_path(), "w", encoding="utf-8") as fh:
-            json.dump({"outputRoot": path}, fh)
+        with open(_agent_config_path(name), "w", encoding="utf-8") as fh:
+            json.dump({key: value}, fh)
     except OSError:
         pass
+
+
+def _load_output_root_override() -> Optional[str]:
+    return _load_agent_config("output_root", "outputRoot")
+
+
+def _save_output_root_override(path: str) -> None:
+    _save_agent_config("output_root", "outputRoot", path)
+
+
+def _load_model_path_override() -> Optional[str]:
+    return _load_agent_config("model_path", "modelPath")
+
+
+def _save_model_path_override(path: str) -> None:
+    _save_agent_config("model_path", "modelPath", path)
 
 
 def _resolve_output_root(command: dict) -> str:
@@ -70,6 +89,16 @@ def _resolve_output_root(command: dict) -> str:
     if _output_root_override:
         return _output_root_override
     raise ValueError("출력 폴더가 지정되지 않았고, 이 워커에도 기본 저장 경로가 설정돼 있지 않습니다.")
+
+
+def _resolve_model_path(command: dict) -> str:
+    """output과 같은 패턴 - 명령에 model이 명시돼 있으면 우선, 없으면 워커 기본 모델 경로."""
+    model = (command.get("model") or "").strip()
+    if model:
+        return model
+    if _model_path_override:
+        return _model_path_override
+    raise ValueError("모델 pt 경로가 지정되지 않았고, 이 워커에도 기본 모델 경로가 설정돼 있지 않습니다.")
 
 
 def _post(server: str, token: str, path: str, payload: dict, timeout: float = 10.0) -> dict:
@@ -151,7 +180,7 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
             message = "학습 완료"
         else:
             result = inference.run(
-                command["source"], _resolve_output_root(command), command["model"],
+                command["source"], _resolve_output_root(command), _resolve_model_path(command),
                 command.get("runName"), command["options"])
             message = result.to_display_text()
             if command.get("mirror"):
@@ -170,18 +199,21 @@ def _run_job(server: str, token: str, agent_id: str, command: dict) -> None:
 
 def run_agent(server: str, token: str, agent_id: str,
               stop_event: Optional[threading.Event] = None, log=print,
-              output_root: Optional[str] = None) -> None:
+              output_root: Optional[str] = None, model_path: Optional[str] = None) -> None:
     """워커 루프 본체. CLI(--agent)에서도, main.py의 ControlPanel(GUI에서 "이 PC를 워커로
     접속" 버튼 -> QThread)에서도 이 함수 하나를 그대로 씀 - stop_event로 그만둘 수 있고,
     log 콜백으로 print 대신 GUI 쪽에 상태를 보낼 수 있음(기본값은 CLI 그대로 동작).
 
-    output_root: --output-root로 준 값이 있으면 그걸 기본 저장 경로로 쓰고 저장함(다음
-    실행에도 유지). 없으면 지난번에 저장된 값을 그대로 불러옴(둘 다 없으면 매 작업마다
-    output을 명시해야 함)."""
-    global _output_root_override
+    output_root/model_path: --output-root/--model-path로 준 값이 있으면 그걸 기본값으로
+    쓰고 저장함(다음 실행에도 유지). 없으면 지난번에 저장된 값을 그대로 불러옴(둘 다 없으면
+    매 작업마다 중앙에서 output/model을 명시해야 함)."""
+    global _output_root_override, _model_path_override
     _output_root_override = output_root or _load_output_root_override()
     if output_root:
         _save_output_root_override(output_root)
+    _model_path_override = model_path or _load_model_path_override()
+    if model_path:
+        _save_model_path_override(model_path)
 
     stop_event = stop_event or threading.Event()
     log(f"[Agent] {agent_id} -> {server} 접속 시도...")
@@ -190,7 +222,7 @@ def run_agent(server: str, token: str, agent_id: str,
         try:
             _post(server, token, "/register",
                   {"agentId": agent_id, "hostname": socket.gethostname(), "gpu": gpu_state,
-                   "outputRoot": _output_root_override or ""})
+                   "outputRoot": _output_root_override or "", "modelPath": _model_path_override or ""})
             break
         except Exception as exc:  # noqa: BLE001 - URL 오타/서버가 아직 안 뜬 상태 등 뭐든 재시도
             log(f"[Agent] 서버 연결 실패({exc}), {POLL_INTERVAL_SECONDS}초 후 재시도...")
@@ -237,7 +269,7 @@ def run_agent(server: str, token: str, agent_id: str,
             progress = "작업 실행 중" if busy_event.is_set() else ""
             result = _post(server, token, "/poll",
                             {"agentId": agent_id, "progress": progress, "busy": busy_event.is_set(),
-                             "outputRoot": _output_root_override or ""})
+                             "outputRoot": _output_root_override or "", "modelPath": _model_path_override or ""})
         except Exception as exc:  # noqa: BLE001 - 위와 같은 이유로 폭넓게 잡아서 재시도
             log(f"[Agent] 폴링 실패({exc})")
             stop_event.wait(POLL_INTERVAL_SECONDS)
@@ -255,6 +287,11 @@ def run_agent(server: str, token: str, agent_id: str,
             if _output_root_override:
                 _save_output_root_override(_output_root_override)
             log(f"[Agent] 기본 저장 경로 변경: {_output_root_override or '(미설정)'}")
+        elif command and command.get("type") == "set_model_path":
+            _model_path_override = (command.get("path") or "").strip() or None
+            if _model_path_override:
+                _save_model_path_override(_model_path_override)
+            log(f"[Agent] 기본 모델 경로 변경: {_model_path_override or '(미설정)'}")
         stop_event.wait(POLL_INTERVAL_SECONDS)
 
     liveness_stop.set()
@@ -273,8 +310,12 @@ def main() -> None:
     parser.add_argument("--output-root", default=None,
                          help="이 워커의 기본 저장 경로(로컬). 비우면 저장된 값을 쓰거나, "
                               "매 작업마다 중앙에서 output을 지정해야 함")
+    parser.add_argument("--model-path", default=None,
+                         help="이 워커의 기본 모델 pt 경로(로컬). 비우면 저장된 값을 쓰거나, "
+                              "매 작업마다 중앙에서 model을 지정해야 함")
     args = parser.parse_args()
-    run_agent(args.server, args.token, args.name or socket.gethostname(), output_root=args.output_root)
+    run_agent(args.server, args.token, args.name or socket.gethostname(),
+              output_root=args.output_root, model_path=args.model_path)
 
 
 if __name__ == "__main__":
