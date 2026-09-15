@@ -3037,7 +3037,11 @@ def main() -> int:
         if manual:
             check_update_button.setEnabled(False)
             version_status_label.setText(f"버전: {version_label} (확인 중...)")
-        worker = BackgroundCallWorker(updatecheck.check_for_update)
+        # manual=True(사용자가 버튼 누름)일 땐 silent=False로 넘겨서, 네트워크/방화벽 문제로
+        # 확인 자체가 실패해도 "최신 버전"처럼 보이지 않고 아래 _handle_error에서 실제 실패
+        # 사유를 보여줌(사용자 보고: 방화벽 막힌 PC에서 계속 "최신 버전"으로만 떠서 실제로는
+        # 확인이 안 되고 있다는 걸 알 방법이 없었음).
+        worker = BackgroundCallWorker(updatecheck.check_for_update, 5.0, not manual)
 
         def _handle(info: Optional[dict]) -> None:
             _on_update_checked(info)

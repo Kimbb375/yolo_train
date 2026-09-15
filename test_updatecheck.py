@@ -80,6 +80,31 @@ def check_full_download_when_deps_changed() -> None:
     print("OK: 의존성(depsSha) 다르면 fast=False, 전체 재다운로드 안내.")
 
 
+def check_silent_false_raises_on_network_failure() -> None:
+    # 방화벽 등으로 GitHub 접속 자체가 막히면(사용자 보고: "다른 PC에서는 계속 최신
+    # 버전이라고만 뜸"), silent=True(자동 체크)는 조용히 None이지만 silent=False(수동
+    # "업데이트 확인" 버튼)는 실패를 그대로 드러내야 진짜 원인을 알 수 있음.
+    previous = appversion.COMMIT_SHA
+    appversion.COMMIT_SHA = "abc123"
+    real_urlopen = urllib.request.urlopen
+
+    def _raise(url, timeout=None):
+        raise OSError("network unreachable")
+
+    urllib.request.urlopen = _raise
+    try:
+        assert updatecheck.check_for_update(silent=True) is None
+        try:
+            updatecheck.check_for_update(silent=False)
+            raise AssertionError("silent=False는 네트워크 실패를 그대로 던져야 함")
+        except OSError:
+            pass
+    finally:
+        urllib.request.urlopen = real_urlopen
+        appversion.COMMIT_SHA = previous
+    print("OK: silent=True는 네트워크 실패를 삼키고, silent=False는 그대로 던짐.")
+
+
 def check_apply_update_extracts_into_app_dir() -> None:
     zip_bytes = io.BytesIO()
     with zipfile.ZipFile(zip_bytes, "w") as archive:
@@ -103,4 +128,5 @@ if __name__ == "__main__":
     check_no_update_when_same_commit()
     check_fast_update_when_deps_unchanged()
     check_full_download_when_deps_changed()
+    check_silent_false_raises_on_network_failure()
     check_apply_update_extracts_into_app_dir()

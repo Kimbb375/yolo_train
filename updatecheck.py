@@ -26,9 +26,16 @@ DOWNLOAD_URL = f"https://github.com/{REPO}/releases/latest/download/TrainingData
 UPDATE_ZIP_URL = f"https://github.com/{REPO}/releases/latest/download/update.zip"
 
 
-def check_for_update(timeout: float = 5.0) -> Optional[dict]:
-    """새 버전이 있으면 {"message": html, "fast": bool}, 없거나 확인 불가하면 None.
-    fast=True면 apply_update()로 재다운로드 없이 소스만 갱신 가능."""
+def check_for_update(timeout: float = 5.0, silent: bool = True) -> Optional[dict]:
+    """새 버전이 있으면 {"message": html, "fast": bool}, 없으면 None.
+    fast=True면 apply_update()로 재다운로드 없이 소스만 갱신 가능.
+
+    silent=True(기본, 앱 시작 시 자동 체크용): 네트워크/파싱 실패도 조용히 None 반환 -
+    업데이트 확인 실패가 앱 사용을 막으면 안 됨.
+    silent=False(상태 표시줄 "업데이트 확인" 수동 클릭용): 실패를 그대로 예외로 던짐 -
+    안 그러면 방화벽 등으로 GitHub 접속 자체가 막힌 PC에서도 "최신 버전"으로만 보여서
+    실제로는 확인이 실패했다는 걸 사용자가 알 방법이 없었음(사용자 보고: "다른 PC에서는
+    업데이트가 계속 최신 버전이라고만 뜸" - 방화벽으로 매 요청이 조용히 실패하고 있었음)."""
     if not appversion.COMMIT_SHA:
         return None  # 로컬 개발 실행 - 체크 안 함
 
@@ -38,8 +45,10 @@ def check_for_update(timeout: float = 5.0) -> Optional[dict]:
         latest_sha = data.get("sha", "")
         latest_version = data.get("version", "")
         latest_deps_sha = data.get("depsSha", "")
-    except Exception:  # noqa: BLE001 - 네트워크/파싱 실패는 조용히 무시
-        return None
+    except Exception:
+        if silent:
+            return None
+        raise
 
     if not latest_sha or latest_sha == appversion.COMMIT_SHA:
         return None
