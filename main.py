@@ -2700,22 +2700,44 @@ class RemoteBrowseDialog(QDialog):
         self._request_id: Optional[str] = None
         self._request_started_at = 0.0
         self._current_path = ""
+        # 뒤로/앞으로 가기용 방문 기록 - 브라우저 히스토리와 같은 패턴(현재 위치 =
+        # _history[_history_index]). 새 위치로 "이동"(더블클릭/상위 폴더/주소창 입력)하면
+        # 현재 인덱스 뒤를 잘라내고 새로 추가함(사용자 요청: "이전으로 돌아가기 등등 편의 기능").
+        self._history: list[str] = []
+        self._history_index = -1
         self.selected_path: Optional[str] = None
 
         self.setWindowTitle(f"워커({agent_id}) 경로 찾아보기")
-        self.resize(480, 420)
+        self.resize(520, 440)
 
-        self.path_label = QLabel("(드라이브 목록)")
-        self.path_label.setWordWrap(True)
+        self.back_button = QPushButton("←")
+        self.back_button.setToolTip("뒤로")
+        self.back_button.setEnabled(False)
+        self.back_button.clicked.connect(self._go_back)
+        self.forward_button = QPushButton("→")
+        self.forward_button.setToolTip("앞으로")
+        self.forward_button.setEnabled(False)
+        self.forward_button.clicked.connect(self._go_forward)
+        up_button = QPushButton("↑")
+        up_button.setToolTip("상위 폴더")
+        up_button.clicked.connect(self._go_up)
+        refresh_button = QPushButton("새로고침")
+        refresh_button.clicked.connect(lambda: self._request_listing(self._current_path))
+
+        # 주소창 - 워커의 특정 경로를 이미 알고 있으면 목록을 계속 더블클릭할 필요 없이
+        # 바로 타이핑하고 Enter로 이동함(사용자 요청: "경로 검색창"). 현재 위치로도 항상
+        # 갱신되므로 복사해서 다른 곳에 붙여넣는 용도로도 씀.
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("경로 직접 입력 후 Enter (예: D:\\models)")
+        self.path_input.returnPressed.connect(self._on_path_input_entered)
+        go_button = QPushButton("이동")
+        go_button.clicked.connect(self._on_path_input_entered)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
 
-        up_button = QPushButton("상위 폴더")
-        up_button.clicked.connect(self._go_up)
-        refresh_button = QPushButton("새로고침")
-        refresh_button.clicked.connect(lambda: self._request_listing(self._current_path))
         self.select_button = QPushButton("이 폴더 선택")
         self.select_button.clicked.connect(self._select_current_folder)
         self.select_button.setVisible(mode == "folders")
@@ -2723,9 +2745,14 @@ class RemoteBrowseDialog(QDialog):
         cancel_button.clicked.connect(self.reject)
 
         nav_row = QHBoxLayout()
+        nav_row.addWidget(self.back_button)
+        nav_row.addWidget(self.forward_button)
         nav_row.addWidget(up_button)
         nav_row.addWidget(refresh_button)
-        nav_row.addStretch(1)
+
+        address_row = QHBoxLayout()
+        address_row.addWidget(self.path_input, stretch=1)
+        address_row.addWidget(go_button)
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -2733,8 +2760,8 @@ class RemoteBrowseDialog(QDialog):
         button_row.addWidget(cancel_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.path_label)
         layout.addLayout(nav_row)
+        layout.addLayout(address_row)
         layout.addWidget(self.list_widget, stretch=1)
         layout.addWidget(self.status_label)
         layout.addLayout(button_row)
@@ -2743,7 +2770,41 @@ class RemoteBrowseDialog(QDialog):
         self._poll_timer.setInterval(self._POLL_MS)
         self._poll_timer.timeout.connect(self._check_result)
 
-        self._request_listing("")
+        self._navigate("")
+
+    def _navigate(self, path: str) -> None:
+        """새 위치로 이동(사용자 액션) - 히스토리에 기록해서 뒤로/앞으로 가능하게 함.
+        새로고침/뒤로/앞으로는 이걸 안 거치고 _request_listing을 직접 불러 기록을 안 남김."""
+        if self._history_index < len(self._history) - 1:
+            self._history = self._history[: self._history_index + 1]
+        self._history.append(path)
+        self._history_index += 1
+        self._update_nav_buttons()
+        self._request_listing(path)
+
+    def _go_back(self) -> None:
+        if self._history_index > 0:
+            self._history_index -= 1
+            self._update_nav_buttons()
+            self._request_listing(self._history[self._history_index])
+
+    def _go_forward(self) -> None:
+        if self._history_index < len(self._history) - 1:
+            self._history_index += 1
+            self._update_nav_buttons()
+            self._request_listing(self._history[self._history_index])
+
+    def _update_nav_buttons(self) -> None:
+        self.back_button.setEnabled(self._history_index > 0)
+        self.forward_button.setEnabled(self._history_index < len(self._history) - 1)
+
+    def _on_path_input_entered(self) -> None:
+        path = self.path_input.text().strip()
+        # 드라이브 문자만 입력해도(예: "D:") 되게 보정 - 워커 쪽 os.listdir이 "D:"만
+        # 받으면 그 드라이브의 "현재 디렉터리"라는 애매한 의미가 돼서 항상 루트로 고정함.
+        if len(path) == 2 and path[1] == ":":
+            path += "\\"
+        self._navigate(path)
 
     def _request_listing(self, path: str) -> None:
         self._request_id = uuid.uuid4().hex
@@ -2774,7 +2835,7 @@ class RemoteBrowseDialog(QDialog):
             self.select_button.setEnabled(self._mode == "folders" and bool(self._current_path))
             return
         self._current_path = result.get("path", "")
-        self.path_label.setText(self._current_path or "(드라이브 목록)")
+        self.path_input.setText(self._current_path)
         entries = result.get("entries", [])
         for entry in entries:
             self.list_widget.addItem(entry)
@@ -2785,7 +2846,7 @@ class RemoteBrowseDialog(QDialog):
         name = item.text()
         if name.endswith("\\"):
             new_path = name if not self._current_path else os.path.join(self._current_path, name)
-            self._request_listing(new_path)
+            self._navigate(new_path)
         else:
             # 폴더가 아닌 항목은 mode="pt_files"일 때만 옴(.pt 파일) - 바로 선택하고 닫음.
             self.selected_path = os.path.join(self._current_path, name)
@@ -2797,9 +2858,9 @@ class RemoteBrowseDialog(QDialog):
         stripped = self._current_path.rstrip("\\")
         parent = os.path.dirname(stripped)
         if not parent or parent == stripped:
-            self._request_listing("")  # 드라이브 루트까지 올라가면 드라이브 목록으로
+            self._navigate("")  # 드라이브 루트까지 올라가면 드라이브 목록으로
         else:
-            self._request_listing(parent + "\\")
+            self._navigate(parent + "\\")
 
     def _select_current_folder(self) -> None:
         if self._current_path:
