@@ -162,9 +162,65 @@ def check_failed_install_allows_retry() -> None:
     print("OK: 설치 실패(installed=False) 마커는 재시도를 막지 않음.")
 
 
+def check_short_python_alias_success() -> None:
+    # 관리자 권한 없이 긴 경로 문제를 피하는 subst 우회 로직 검증 - 이미 쓰는 드라이브
+    # 문자(Z:)는 건너뛰고 다음 문자(Y:)에 매핑을 시도해야 함.
+    import subprocess
+    real_run = subprocess.run
+    real_exists = os.path.exists
+    calls = []
+
+    def fake_exists(path):
+        return path == "Z:\\"
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return types.SimpleNamespace(returncode=0)
+
+    os.path.exists = fake_exists
+    subprocess.run = fake_run
+    try:
+        drive, python_path = gpu_setup._short_python_alias()
+    finally:
+        os.path.exists = real_exists
+        subprocess.run = real_run
+
+    assert drive == "Y:"
+    assert python_path == os.path.join("Y:\\", os.path.basename(sys.executable))
+    assert calls == [["subst", "Y:", os.path.dirname(sys.executable)]]
+    print("OK: _short_python_alias가 이미 쓰는 드라이브는 건너뛰고 다음 문자에 subst함.")
+
+
+def check_short_python_alias_all_taken_returns_none() -> None:
+    real_exists = os.path.exists
+    os.path.exists = lambda path: True  # 모든 드라이브 문자가 이미 사용 중이라고 흉내
+    try:
+        result = gpu_setup._short_python_alias()
+    finally:
+        os.path.exists = real_exists
+    assert result == (None, None)
+    print("OK: 쓸 수 있는 드라이브 문자가 없으면 (None, None) 반환(호출부가 sys.executable로 폴백).")
+
+
+def check_release_short_alias_noop_for_none() -> None:
+    import subprocess
+    real_run = subprocess.run
+    called = []
+    subprocess.run = lambda *a, **k: (called.append(a), types.SimpleNamespace(returncode=0))[1]
+    try:
+        gpu_setup._release_short_alias(None)
+    finally:
+        subprocess.run = real_run
+    assert called == []
+    print("OK: alias_drive가 None이면 subst 해제 명령을 호출 안 함.")
+
+
 if __name__ == "__main__":
     check_wants_gpu()
     check_dev_mode_skips()
     check_already_cuda_available()
     check_install_flow_and_retry_guard()
     check_failed_install_allows_retry()
+    check_short_python_alias_success()
+    check_short_python_alias_all_taken_returns_none()
+    check_release_short_alias_noop_for_none()

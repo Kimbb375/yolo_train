@@ -31,6 +31,43 @@ _TENSORRT_PACKAGES = {"onnx": "onnx", "onnxslim": "onnxslim",
                       "onnxruntime-gpu": "onnxruntime", "tensorrt": "tensorrt"}
 
 
+def _short_python_alias() -> tuple[str | None, str | None]:
+    """python.exe/pythonw.exe가 있는 폴더에 짧은 드라이브 문자를 임시로 매핑함(subst) -
+    일반 사용자 권한으로 됨(관리자 권한 불필요), 로그오프/재부팅하면 자동으로 사라짐.
+
+    설치 경로가 깊으면(예: C:\\whale_program\\TrainingDataExtractor\\TrainingDataExtractor\\
+    python) torch wheel에 번들된 깊은 서드파티 라이선스 경로(kineto/dynolog/
+    prometheus-cpp/googletest/...)와 합쳐져서 Windows MAX_PATH(260자)를 넘어 설치가
+    [WinError 206]으로 실패함(사용자 보고). "Windows 긴 경로 지원" 레지스트리 설정은 관리자
+    권한이 필요한데, 관리자 권한이 아예 없는 PC가 있었음(사용자 보고: "레지스트리에 액세스할
+    수 없습니다"). subst로 그 폴더 자체를 짧은 드라이브(예: Z:\\)로 매핑하면 pip이 그
+    드라이브 기준의 짧은 경로만 쓰게 되어 관리자 권한 없이도 같은 문제를 피할 수 있음.
+
+    실패하면 (None, None) - 호출부가 원래 sys.executable로 그대로 폴백함(subst 자체를
+    못 쓰는 제한된 환경 등)."""
+    real_dir = os.path.dirname(sys.executable)
+    for letter in "ZYXWVUTSRQPONMLKJIHGFEDCBA":
+        drive = f"{letter}:"
+        if os.path.exists(drive + "\\"):
+            continue
+        try:
+            result = subprocess.run(["subst", drive, real_dir], capture_output=True, timeout=10)
+        except Exception:  # noqa: BLE001 - subst 자체를 못 쓰는 환경일 수 있음
+            return None, None
+        if result.returncode == 0:
+            return drive, os.path.join(drive + "\\", os.path.basename(sys.executable))
+    return None, None
+
+
+def _release_short_alias(drive: str | None) -> None:
+    if not drive:
+        return
+    try:
+        subprocess.run(["subst", drive, "/D"], capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001 - 정리 실패해도 세션 종료 시 어차피 해제됨
+        pass
+
+
 def _marker_path() -> str:
     # sys.executable = <배포 폴더>/python/python(w).exe (포터블 standalone CPython, venv 아님)
     return os.path.join(os.path.dirname(sys.executable), "_gpu_torch_attempted.json")
@@ -98,6 +135,11 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
 
     log(f"[GPU] CUDA torch가 없어서 설치를 시작합니다 ({INDEX_URL}, 수 분 소요될 수 있음)...")
     ok = False
+    # 설치 경로가 깊어서 torch wheel의 깊은 라이선스 경로와 합쳐지면 Windows 경로 길이
+    # 제한(260자)에 걸릴 수 있음 - subst로 짧은 드라이브 문자를 미리 매핑해서 애초에 그런
+    # 상황 자체를 피함(관리자 권한 불필요, 아래 alias_python 참고).
+    alias_drive, alias_python = _short_python_alias()
+    python_exe = alias_python or sys.executable
     try:
         # --ignore-installed 없으면 pip이 "torch==2.13.0+cu126이 이미 설치돼 있음"으로 보고
         # 아무것도 안 하고 성공 처리해버림 - 재설치 버튼을 눌러도(설치는 이미 한 번
@@ -111,7 +153,7 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
         # 다시 받고, numpy 등 의존 패키지는 안 건드림(--index-url이 일반 PyPI가 아니라 저
         # 의존 패키지들을 못 찾아서 실패할 수 있음).
         process = subprocess.Popen(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages",
+            [python_exe, "-m", "pip", "install", "--break-system-packages",
              "--ignore-installed", "--no-deps", "--no-cache-dir",
              f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}",
              "--index-url", INDEX_URL],
@@ -124,14 +166,21 @@ def ensure_cuda_torch(log=print, force: bool = False) -> bool:
         if not ok and any("WinError 206" in ln or "너무 깁니다" in ln for ln in output_lines):
             # torch wheel에 번들된 서드파티(kineto/dynolog/prometheus-cpp/googletest) 라이선스
             # 파일 경로가 원래 깊은데, 설치 경로까지 깊으면(중첩 폴더 등) 합쳐서 Windows
-            # MAX_PATH(260자) 제한에 걸림 - pip/torch 버그가 아니라 OS 제한이라 코드로는
-            # 못 없앰, 레지스트리로 "Windows 긴 경로 지원"을 켜야 함(관리자 권한, 1회성).
-            log("[GPU] 원인: 설치 경로가 길어서 Windows 경로 길이 제한(260자)에 걸림. "
-                "해결: 관리자 권한 PowerShell에서 아래 명령 실행 후 재부팅하고 다시 시도하세요.")
+            # MAX_PATH(260자) 제한에 걸림 - 위에서 짧은 드라이브(subst)로 이미 우회를
+            # 시도했는데도 또 실패했다는 뜻(alias_python이 None이라 subst 자체를 못 썼거나,
+            # subst한 드라이브 경로로도 여전히 넘음). 마지막 수단으로 레지스트리 안내를 남김
+            # (관리자 권한 필요 - 관리자 권한이 아예 없는 PC는 이 방법도 못 씀).
+            log("[GPU] 원인: 설치 경로가 길어서 Windows 경로 길이 제한(260자)에 걸림 "
+                f"(짧은 드라이브 우회 {'시도했지만 실패' if alias_python else '불가(subst 실패)'}). "
+                "관리자 권한이 있다면 PowerShell(관리자)에서 아래 명령 실행 후 재부팅하고 "
+                "다시 시도하세요. 관리자 권한이 없다면 앱을 더 짧은 경로(예: C:\\td\\)에 "
+                "옮겨서 설치해보세요.")
             log('[GPU]   New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem" '
                 '-Name "LongPathsEnabled" -Value 1 -PropertyType DWord -Force')
     except Exception as exc:  # noqa: BLE001 - 설치 실패는 CPU 폴백으로 처리
         log(f"[GPU] 설치 실패: {exc}")
+    finally:
+        _release_short_alias(alias_drive)
 
     try:
         with open(_marker_path(), "w", encoding="utf-8") as fh:
