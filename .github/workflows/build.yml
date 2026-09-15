@@ -67,10 +67,17 @@ jobs:
           $manifest = @{ sha = "${{ github.sha }}"; version = "${{ env.BUILD_VERSION }}"; depsSha = "${{ env.DEPS_SHA }}" } | ConvertTo-Json -Compress
           Set-Content -Path dist\version.json -Value $manifest
 
-      - name: Publish rolling release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          # 예전엔 tag_name: latest 로 릴리스 하나를 계속 재사용/덮어썼는데, 그러면 자산
+          # URL(.../releases/latest/download/TrainingDataExtractor.zip)이 매번 똑같아서
+          # CDN/사내망 캐시가 예전 버전을 계속 캐싱해서 서빙하는 문제가 있었음(사용자 보고:
+          # "재설치해도 62버전이 받아짐, 실제 최신은 63인데"). 빌드마다 고유한 태그(버전
+          # 문자열 자체가 run_number 포함이라 이미 고유함)로 릴리스를 새로 만들면 자산 URL도
+          # 매번 달라져서 캐시가 절대 이전 내용을 서빙 못 함. make_latest: true라
+          # releases/latest 쪽은 자동으로 이 새 릴리스를 가리킴(태그 이름이 "latest"일 필요 없음).
+          tag_name: "${{ env.BUILD_VERSION }}"
           name: "${{ env.BUILD_VERSION }} (${{ github.sha }})"
           body: |
             자동 빌드됨. 버전: ${{ env.BUILD_VERSION }} / 커밋: ${{ github.sha }}
