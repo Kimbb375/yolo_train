@@ -26,6 +26,7 @@ from typing import Optional
 
 import gpu_setup
 import inference
+import trainerscript
 import training
 
 # ponytail: 2.0였다가 1.0으로 줄임 - 명령 수신/로그 반영 지연을 줄여서 체감 반응성을
@@ -369,12 +370,28 @@ def run_agent(server: str, token: str, agent_id: str,
         elif command and command.get("type") in ("start_job", "start_training"):
             label = command.get("runName") or command.get("name") or "(자동 이름)"
             log(f"[Agent] 작업 수신: {label}")
+            trainerscript.resume()  # 이전 작업이 일시정지 상태로 남아있었을 수 있는 경우 방어적으로 초기화
             if on_job_started is not None:
                 on_job_started(label)
             busy_event.set()
             job_started_at[0] = time.time()
             last_output_at[0] = time.time()
             threading.Thread(target=run_job_in_background, args=(command,), daemon=True).start()
+        elif command and command.get("type") in ("pause_job", "resume_job"):
+            # 배치 경계에서만 멈춤(trainerscript.wait_if_paused) - 현재 처리 중인 배치는
+            # 끝까지 돌고 다음 배치 전에 멈춤(사용자 요청: "추론 일시중지 버튼"). 워커 화면 +
+            # 중앙 Summary 로그 둘 다에 남김(재연결 알림과 같은 패턴).
+            if command["type"] == "pause_job":
+                trainerscript.pause()
+                status_msg = "[Agent] 일시정지 요청됨 - 현재 배치 처리가 끝나면 멈춥니다."
+            else:
+                trainerscript.resume()
+                status_msg = "[Agent] 재개됨."
+            log(status_msg)
+            if on_job_output is not None:
+                on_job_output(status_msg)
+            with contextlib.suppress(Exception):
+                _post(server, token, "/log", {"agentId": agent_id, "lines": [status_msg]})
         elif command and command.get("type") == "set_output_root":
             _output_root_override = (command.get("path") or "").strip() or None
             if _output_root_override:

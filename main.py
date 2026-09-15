@@ -58,6 +58,7 @@ import review
 import sourceimage
 import sourceverify
 import trainingdataset
+import trainerscript
 import training
 import appversion
 import updatecheck
@@ -936,6 +937,7 @@ class _JobView:
         self.progress_value = 0
         self.progress_max = 0
         self.running = False
+        self.paused = False
         self.log_seen = 0  # 원격 전용: server의 logTail 중 어디까지 이미 반영했는지
 
 
@@ -1028,8 +1030,14 @@ class InferenceTab(QWidget):
 
         self.start_button = QPushButton("추론 시작")
         self.start_button.clicked.connect(self._on_start_clicked)
+        # 배치 경계에서만 멈춤(trainerscript.pause/resume) - 현재 처리 중인 배치는 끝까지
+        # 돌고 다음 배치 전에 멈추므로 즉시 반응은 아님(사용자 요청: "추론 일시중지 버튼").
+        self.pause_button = QPushButton("일시중지")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self._on_pause_clicked)
         build_row = QHBoxLayout()
         build_row.addWidget(self.start_button)
+        build_row.addWidget(self.pause_button)
         build_row.addStretch(1)
 
         detail_split = QSplitter(Qt.Orientation.Horizontal)
@@ -1096,9 +1104,12 @@ class InferenceTab(QWidget):
 
     def _on_worker_job_done(self, ok: bool, message: str) -> None:
         self._route_incoming(None, ("[워커] 완료: " if ok else "[워커] 실패: ") + message)
-        self._get_state(None).running = False
+        state = self._get_state(None)
+        state.running = False
+        state.paused = False
         if self._remote_agent_id is None:
             self.start_button.setEnabled(True)
+            self._update_pause_button(state)
 
     def _on_control_target_changed(self, agent_id: Optional[str]) -> None:
         self._remote_agent_id = agent_id
@@ -1230,6 +1241,11 @@ class InferenceTab(QWidget):
         self.progress_bar.setMaximum(state.progress_max or 1)
         self.progress_bar.setValue(state.progress_value)
         self.start_button.setEnabled(not state.running)
+        self._update_pause_button(state)
+
+    def _update_pause_button(self, state: _JobView) -> None:
+        self.pause_button.setEnabled(state.running)
+        self.pause_button.setText("재개" if state.paused else "일시중지")
 
     @staticmethod
     def _log_group(title: str, content: QPlainTextEdit) -> QGroupBox:
@@ -1427,6 +1443,7 @@ class InferenceTab(QWidget):
             self._start_remote(target_key, source)
             return
 
+        trainerscript.resume()  # 이전 실행이 일시정지 상태로 남아있었을 수 있는 경우 방어적으로 초기화
         self._route_incoming(None, "추론 시작...")
         self._worker = BackgroundCallWorker(
             inference.run, source, output_root, model_path,
@@ -1443,6 +1460,7 @@ class InferenceTab(QWidget):
             self._get_state(agent_id).running = False
             if agent_id == self._remote_agent_id:
                 self.start_button.setEnabled(True)
+                self._update_pause_button(self._get_state(agent_id))
             return
 
         self._route_incoming(agent_id, f"[{agent_id}]로 원격 추론 명령 전송...")
@@ -1493,8 +1511,10 @@ class InferenceTab(QWidget):
             if agent["currentJob"] is None and agent["progress"].startswith(("완료:", "실패:")):
                 self._route_incoming(agent_id, agent["progress"])
                 state.running = False
+                state.paused = False
                 if agent_id == self._remote_agent_id:
                     self.start_button.setEnabled(True)
+                    self._update_pause_button(state)
                 finished_ids.append(agent_id)
         for agent_id in finished_ids:
             self._active_remote_ids.discard(agent_id)
@@ -1542,15 +1562,40 @@ class InferenceTab(QWidget):
 
     def _on_finished_ok(self, result) -> None:
         self._route_incoming(None, result.to_display_text())
-        self._get_state(None).running = False
+        state = self._get_state(None)
+        state.running = False
+        state.paused = False
         if self._remote_agent_id is None:
             self.start_button.setEnabled(True)
+            self._update_pause_button(state)
 
     def _on_finished_error(self, message: str) -> None:
         self._route_incoming(None, f"[오류] {message}")
-        self._get_state(None).running = False
+        state = self._get_state(None)
+        state.running = False
+        state.paused = False
         if self._remote_agent_id is None:
             self.start_button.setEnabled(True)
+            self._update_pause_button(state)
+
+    def _on_pause_clicked(self) -> None:
+        target_key = self._remote_agent_id
+        state = self._get_state(target_key)
+        if not state.running:
+            return
+        state.paused = not state.paused
+        if target_key is None:
+            if state.paused:
+                trainerscript.pause()
+                self._route_incoming(None, "[일시정지 요청됨 - 현재 배치가 끝나면 멈춥니다]")
+            else:
+                trainerscript.resume()
+                self._route_incoming(None, "[재개함]")
+        else:
+            server = CONTROL_CONTEXT.server
+            if server is not None:
+                server.queue_command(target_key, {"type": "pause_job" if state.paused else "resume_job"})
+        self._update_pause_button(state)
 
 
 class InferenceTestTab(InferenceTab):

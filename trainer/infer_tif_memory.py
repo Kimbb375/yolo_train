@@ -11,6 +11,15 @@ import numpy as np
 import tifffile
 from PIL import Image
 
+try:
+    # trainerscript.run()을 통해 이 프로세스 안에서 불릴 때(정상 배포 경로)는 trainerscript가
+    # 이미 sys.modules에 있어서 항상 성공함. "python trainer/infer_tif_memory.py"로 직접
+    # 단독 실행하는 경우(레포 루트가 sys.path에 없음)엔 실패할 수 있어서 그때는 일시정지
+    # 기능 없이(항상 실행 중인 것처럼) 그냥 진행함.
+    import trainerscript
+except ImportError:
+    trainerscript = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("YOLO_CONFIG_DIR", str(ROOT))
@@ -504,6 +513,8 @@ def process_loaded_tif(model, loaded, args, tile, stride, batch, limit_remaining
             })
             processed += 1
             if len(batch_tiles) >= batch:
+                if trainerscript is not None:
+                    trainerscript.wait_if_paused()  # 배치 경계 - 일시정지 중이면 여기서 블로킹
                 batch_result = run_batch(model, batch_tiles, batch_meta, args, candidates, raw_path)
                 filtered_edge += batch_result["filteredEdge"]
                 batch_tiles.clear()

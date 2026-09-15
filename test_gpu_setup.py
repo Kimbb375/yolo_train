@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import types
 
 import appversion
@@ -25,6 +26,34 @@ def check_wants_gpu() -> None:
     assert trainerscript._wants_gpu(["--options", "tile=640, device=cpu, conf=0.1"]) is False
     assert trainerscript._wants_gpu(["--options", "tile=640, device=0, conf=0.1"]) is True
     print("OK: _wants_gpu - --device 플래그/--options 내장 device= 둘 다 cpu 감지.")
+
+
+def check_pause_resume_blocks_and_unblocks() -> None:
+    # 추론 일시중지 버튼(사용자 요청) - trainer/infer_tif_memory.py가 배치 경계에서
+    # wait_if_paused()를 부름. pause() 하면 블로킹, resume() 하면 즉시 풀려야 함.
+    trainerscript.resume()  # 다른 테스트/이전 실행이 paused로 남겨뒀을 수 있는 것 방지
+    assert trainerscript.is_paused() is False
+
+    trainerscript.pause()
+    assert trainerscript.is_paused() is True
+
+    unblocked = threading.Event()
+
+    def waiter() -> None:
+        trainerscript.wait_if_paused()
+        unblocked.set()
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    try:
+        assert not unblocked.wait(0.2), "일시정지 중인데 바로 풀리면 안 됨"
+        trainerscript.resume()
+        assert unblocked.wait(1.0), "resume() 후엔 곧 풀려야 함"
+        assert trainerscript.is_paused() is False
+    finally:
+        thread.join(timeout=1.0)
+
+    print("OK: pause()/resume()/wait_if_paused - 일시정지 중엔 블로킹, resume하면 풀림.")
 
 
 def check_dev_mode_skips() -> None:
@@ -217,6 +246,7 @@ def check_release_short_alias_noop_for_none() -> None:
 
 if __name__ == "__main__":
     check_wants_gpu()
+    check_pause_resume_blocks_and_unblocks()
     check_dev_mode_skips()
     check_already_cuda_available()
     check_install_flow_and_retry_guard()

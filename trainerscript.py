@@ -15,12 +15,40 @@ import importlib
 import os
 import re
 import sys
+import threading
 from typing import Sequence
 
 TRAINER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trainer")
 
 # ultralytics(torch)를 실제로 쓰는 스크립트만 GPU 준비를 거침 (check_env/download_model 등은 불필요).
 _GPU_MODULES = {"train", "infer_tiles", "infer_tif_memory", "bench_batch"}
+
+# 추론 일시중지/재개(사용자 요청: "추론 일시중지 버튼") - 이 프로세스 안에서 한 번에 한
+# 작업만 도는 전제(로컬은 BackgroundCallWorker 하나, 워커는 busy_event로 동시 실행 막음)라
+# 모듈 전역 Event 하나로 충분함. main.py/module.main() 시그니처를 바꿀 필요 없이 trainer/
+# infer_tif_memory.py가 배치 경계에서 이 모듈을 직접 import해서 확인하는 구조 - trainerscript는
+# 이미 항상 먼저 import된 상태라(run()이 이 프로세스 안에서 모듈을 불러옴) 순환 import 문제 없음.
+_RUNNING_EVENT = threading.Event()
+_RUNNING_EVENT.set()  # 기본은 실행 중(일시정지 아님)
+
+
+def pause() -> None:
+    _RUNNING_EVENT.clear()
+
+
+def resume() -> None:
+    _RUNNING_EVENT.set()
+
+
+def is_paused() -> bool:
+    return not _RUNNING_EVENT.is_set()
+
+
+def wait_if_paused() -> None:
+    """일시정지 상태가 아니면 즉시 통과, 일시정지 상태면 resume()이 불릴 때까지 블로킹함.
+    타일 배치 경계처럼 중단해도 안전한 지점에서 호출함 - 배치 처리 자체는 끝까지 돌고 다음
+    배치 시작 전에만 멈추므로 즉시 반응은 아님(GPU 연산 중간에 끊는 건 안 함)."""
+    _RUNNING_EVENT.wait()
 
 
 def _wants_gpu(args: Sequence[str]) -> bool:
