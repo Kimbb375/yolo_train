@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import socket
+import string
 import sys
 import tempfile
 import threading
@@ -99,6 +100,38 @@ def _resolve_model_path(command: dict) -> str:
     if _model_path_override:
         return _model_path_override
     raise ValueError("모델 pt 경로가 지정되지 않았고, 이 워커에도 기본 모델 경로가 설정돼 있지 않습니다.")
+
+
+def _list_dir_entries(path: str, mode: str) -> list[str]:
+    """중앙 PC(RemoteBrowseDialog)가 이 워커의 실제 폴더 구조를 보고 "워커 기본 저장/모델
+    경로"를 고를 수 있게 함. path가 비어 있으면 드라이브 목록(루트)을 돌려줌. 폴더는
+    "이름\\"처럼 뒤에 구분자를 붙여서 파일과 구분함 - mode="pt_files"일 때만 .pt 파일도
+    같이 돌려줌(모델 선택용, 출력 폴더 선택은 폴더만 필요해서 mode="folders").
+
+    예전에 이런 실시간 원격 탐색기(list_dir 폴링)를 매 작업 시작 전 소스/모델/출력을 매번
+    골라야 하는 용도로 썼다가 "연결 불안정" 문제로 뺐던 적 있음(5d1ba12). 지금은 가끔
+    설정하는 기본 경로 전용이라 실패해도 다이얼로그에서 재시도하거나 수동 입력으로 바로
+    대체 가능해서 그때와 부담이 다름."""
+    if not path:
+        return sorted(f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\"))
+    names = os.listdir(path)
+    entries = sorted(f"{n}\\" for n in names if os.path.isdir(os.path.join(path, n)))
+    if mode == "pt_files":
+        entries += sorted(n for n in names
+                           if n.lower().endswith(".pt") and os.path.isfile(os.path.join(path, n)))
+    return entries
+
+
+def _handle_list_dir(server: str, token: str, agent_id: str, command: dict) -> None:
+    request_id = command.get("requestId")
+    path = command.get("path") or ""
+    try:
+        entries = _list_dir_entries(path, command.get("mode", "folders"))
+        payload = {"agentId": agent_id, "requestId": request_id, "path": path, "entries": entries}
+    except OSError as exc:
+        payload = {"agentId": agent_id, "requestId": request_id, "path": path, "error": str(exc)}
+    with contextlib.suppress(Exception):
+        _post(server, token, "/dirlist", payload)
 
 
 def _post(server: str, token: str, path: str, payload: dict, timeout: float = 10.0) -> dict:
@@ -281,6 +314,7 @@ def run_agent(server: str, token: str, agent_id: str,
 
     threading.Thread(target=liveness_pinger, daemon=True).start()
 
+    poll_failed = False
     while not stop_event.is_set():
         try:
             progress = "작업 실행 중" if busy_event.is_set() else ""
@@ -288,12 +322,36 @@ def run_agent(server: str, token: str, agent_id: str,
                             {"agentId": agent_id, "progress": progress, "busy": busy_event.is_set(),
                              "outputRoot": _output_root_override or "", "modelPath": _model_path_override or ""})
         except Exception as exc:  # noqa: BLE001 - 위와 같은 이유로 폭넓게 잡아서 재시도
+            poll_failed = True
             log(f"[Agent] 폴링 실패({exc})")
             stop_event.wait(POLL_INTERVAL_SECONDS)
             continue
 
+        if poll_failed:
+            # 중앙 PC를 껐다 켜면(재시작) controlserver.py의 ControlServer가 메모리째 새로
+            # 생겨서 이 워커의 hostname/gpu/기본 경로 정보가 사라짐(heartbeat=/poll은
+            # progress만 갱신, 등록 정보는 최초 /register 때만 감) - 그런데 이 워커는 계속
+            # 폴링만 하고 있어서 다시 등록을 안 함. 게다가 이 워커 화면(worker_status_label)에도
+            # 마지막 "폴링 실패" 문구가 그대로 남아서 실제로는 복구됐는데 끊긴 것처럼 보임
+            # (사용자 보고: "중앙을 껐다 켜면 워커에서는 연결이 끊어져 보임"). 재연결
+            # 성공하면 다시 /register해서 중앙 쪽 정보를 되살리고, 워커 화면 + 중앙 Summary
+            # 로그(둘 다) 에 재연결/현재 상태를 남김.
+            poll_failed = False
+            with contextlib.suppress(Exception):
+                _post(server, token, "/register",
+                      {"agentId": agent_id, "hostname": socket.gethostname(), "gpu": gpu_state,
+                       "outputRoot": _output_root_override or "", "modelPath": _model_path_override or ""})
+            status = (f"작업 실행 중(경과 {int(time.time() - job_started_at[0])}초)"
+                      if busy_event.is_set() else "대기 중")
+            reconnect_msg = f"[Agent] 중앙 서버에 재연결됨 - 현재 상태: {status}"
+            log(reconnect_msg)
+            with contextlib.suppress(Exception):
+                _post(server, token, "/log", {"agentId": agent_id, "lines": [reconnect_msg]})
+
         command = result.get("command")
-        if command and command.get("type") in ("start_job", "start_training"):
+        if command and command.get("type") == "list_dir":
+            _handle_list_dir(server, token, agent_id, command)
+        elif command and command.get("type") in ("start_job", "start_training"):
             label = command.get("runName") or command.get("name") or "(자동 이름)"
             log(f"[Agent] 작업 수신: {label}")
             if on_job_started is not None:

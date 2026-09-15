@@ -4,6 +4,9 @@
 python test_agent.py 로 직접 실행.
 """
 
+import os
+import tempfile
+
 import agent
 import inference
 
@@ -113,9 +116,61 @@ def check_run_job_forwards_output_and_done_locally() -> None:
     print("OK: _run_job이 on_output/on_done 콜백으로 서버 전송과 별개로 로컬에도 전달함.")
 
 
+def check_list_dir_entries_folders_and_pt_files() -> None:
+    # 중앙 PC(RemoteBrowseDialog)가 워커의 실제 폴더 구조를 보고 "워커 기본 저장/모델 경로"를
+    # 고를 수 있게 하는 기능(사용자 요청: "워커 pc경로를 직접 엑세스해서 경로선택 팝업창을
+    # 띄어주게 해줄 수 있어?") - 폴더는 뒤에 "\"를 붙여서 파일과 구분함.
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "sub_a"))
+        os.makedirs(os.path.join(tmp, "sub_b"))
+        with open(os.path.join(tmp, "model.pt"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+        with open(os.path.join(tmp, "readme.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x")
+
+        assert agent._list_dir_entries(tmp, "folders") == ["sub_a\\", "sub_b\\"]
+        assert agent._list_dir_entries(tmp, "pt_files") == ["sub_a\\", "sub_b\\", "model.pt"]
+    print("OK: _list_dir_entries - folders 모드는 폴더만, pt_files 모드는 .pt 파일도 포함(txt는 제외).")
+
+
+def check_list_dir_entries_empty_path_lists_drives() -> None:
+    entries = agent._list_dir_entries("", "folders")
+    assert any(e.upper() == "C:\\" for e in entries)
+    print("OK: 빈 경로는 드라이브 목록(C:\\ 포함)을 돌려줌.")
+
+
+def check_handle_list_dir_posts_result() -> None:
+    real_post = agent._post
+    posted = []
+    agent._post = lambda server, token, path, payload: posted.append((path, payload)) or {}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "sub"))
+            agent._handle_list_dir(
+                "http://central", "tok", "agentA",
+                {"type": "list_dir", "requestId": "req1", "path": tmp, "mode": "folders"})
+        agent._handle_list_dir(
+            "http://central", "tok", "agentA",
+            {"type": "list_dir", "requestId": "req2", "path": "존재안함\\경로", "mode": "folders"})
+    finally:
+        agent._post = real_post
+
+    assert len(posted) == 2
+    ok_path, ok_payload = posted[0]
+    assert ok_path == "/dirlist"
+    assert ok_payload["requestId"] == "req1" and ok_payload["entries"] == ["sub\\"]
+    err_path, err_payload = posted[1]
+    assert err_path == "/dirlist"
+    assert err_payload["requestId"] == "req2" and "error" in err_payload
+    print("OK: _handle_list_dir이 성공/실패(존재하지 않는 경로) 둘 다 /dirlist로 결과를 올림.")
+
+
 if __name__ == "__main__":
     check_tee_survives_none_real_stdout()
     check_tee_still_echoes_to_real_stdout_when_present()
     check_resolve_output_root()
     check_resolve_model_path()
     check_run_job_forwards_output_and_done_locally()
+    check_list_dir_entries_folders_and_pt_files()
+    check_list_dir_entries_empty_path_lists_drives()
+    check_handle_list_dir_posts_result()

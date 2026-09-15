@@ -15,6 +15,8 @@ WebSocket 대비 트레이드오프지만 새 패키지 없이 되는 게 이득
   POST /done      {agentId, ok, message}             작업 종료 보고
   POST /command   {targetAgentId, command}           컨트롤러가 명령 큐에 적재 ("all" 가능)
   POST /upload    (raw zip bytes, X-Agent-Id/X-Run-Name 헤더)  결과 중앙 저장(mirror_root 설정 시)
+  POST /dirlist   {agentId, requestId, path, entries|error}  list_dir 명령 결과 보고
+                                                      (RemoteBrowseDialog가 request_id로 조회)
   GET  /status                                       전체 에이전트 상태 스냅샷(컨트롤러 UI용)
 """
 
@@ -56,6 +58,7 @@ class ControlServer:
         self._lock = threading.Lock()
         self._agents: dict[str, AgentState] = {}
         self._commands: dict[str, list[dict]] = {}
+        self._dir_results: dict[str, dict] = {}
         self._mirror_root: Optional[str] = None
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -155,6 +158,17 @@ class ControlServer:
             queue = self._commands.get(agent_id)
             return queue.pop(0) if queue else None
 
+    def store_dir_result(self, request_id: str, payload: dict) -> None:
+        """워커(agent._handle_list_dir)가 list_dir 명령 결과를 올리면 여기 저장함 -
+        RemoteBrowseDialog(main.py)가 같은 프로세스 안에서 request_id로 바로 꺼내감(HTTP
+        왕복 불필요, 서버가 GUI와 같은 프로세스에서 돎)."""
+        with self._lock:
+            self._dir_results[request_id] = payload
+
+    def take_dir_result(self, request_id: str) -> Optional[dict]:
+        with self._lock:
+            return self._dir_results.pop(request_id, None)
+
     def snapshot(self) -> dict:
         with self._lock:
             now = time.time()
@@ -242,6 +256,9 @@ class ControlServer:
                         self._send_json(200, {"ok": True})
                     elif self.path == "/command":
                         server.queue_command(data["targetAgentId"], data["command"])
+                        self._send_json(200, {"ok": True})
+                    elif self.path == "/dirlist":
+                        server.store_dir_result(data["requestId"], data)
                         self._send_json(200, {"ok": True})
                     else:
                         self._send_json(404, {"error": "not found"})

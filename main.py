@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
@@ -7,6 +8,8 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from typing import Optional
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QThread, QTimer, Signal
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -1050,13 +1054,13 @@ class InferenceTab(QWidget):
         # 경로를 씀(agent._resolve_output_root / _resolve_model_path) - "중앙 PC는 컨트롤만
         # 하고, 모델도 워커 로컬에서 읽어야 GPU/CPU를 중앙이 안 쓴다"는 사용자 요청.
         (self.worker_output_root_row, self.worker_output_root_input,
-         self.worker_output_root_apply_button, self.worker_output_root_status) = self._build_worker_path_row(
+         self.worker_output_root_apply_button, _, self.worker_output_root_status) = self._build_worker_path_row(
             "워커 기본 저장 경로", "워커에 적용할 로컬 경로, 예: C:\\whale_output",
-            self._on_apply_worker_output_root)
+            self._on_apply_worker_output_root, self._on_browse_worker_output_root)
         (self.worker_model_path_row, self.worker_model_path_input,
-         self.worker_model_path_apply_button, self.worker_model_path_status) = self._build_worker_path_row(
+         self.worker_model_path_apply_button, _, self.worker_model_path_status) = self._build_worker_path_row(
             "워커 기본 모델 경로", "워커에 적용할 로컬 pt 경로, 예: C:\\whale_models\\best.pt",
-            self._on_apply_worker_model_path)
+            self._on_apply_worker_model_path, self._on_browse_worker_model_path)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.target_label)
@@ -1129,13 +1133,15 @@ class InferenceTab(QWidget):
         self._render_target(agent_id)
 
     @staticmethod
-    def _build_worker_path_row(label_text: str, placeholder: str, on_apply) -> tuple:
+    def _build_worker_path_row(label_text: str, placeholder: str, on_apply, on_browse) -> tuple:
         """"워커 기본 저장 경로"/"워커 기본 모델 경로" 행은 UI/동작이 완전히 동일한 패턴이라
-        (입력창+적용 버튼+현재값 라벨, 원격 대상일 때만 보임) 공용으로 뺌."""
+        (입력창+적용 버튼+찾아보기 버튼+현재값 라벨, 원격 대상일 때만 보임) 공용으로 뺌."""
         path_input = QLineEdit()
         path_input.setPlaceholderText(placeholder)
         apply_button = QPushButton("워커에 적용")
         apply_button.clicked.connect(on_apply)
+        browse_button = QPushButton("워커 경로 찾아보기...")
+        browse_button.clicked.connect(on_browse)
         status_label = QLabel("")
         status_label.setWordWrap(True)
         row = QWidget()
@@ -1145,10 +1151,11 @@ class InferenceTab(QWidget):
         input_row.addWidget(QLabel(label_text))
         input_row.addWidget(path_input, stretch=1)
         input_row.addWidget(apply_button)
+        input_row.addWidget(browse_button)
         row_layout.addLayout(input_row)
         row_layout.addWidget(status_label)
         row.setVisible(False)
-        return row, path_input, apply_button, status_label
+        return row, path_input, apply_button, browse_button, status_label
 
     def _refresh_worker_output_root_status(self) -> None:
         agent_id = self._remote_agent_id
@@ -1169,11 +1176,14 @@ class InferenceTab(QWidget):
         if not path:
             return
         # 명령 큐에 넣기만 함(agent.py가 다음 폴링 때 - 최대 1초 - 받아서 적용/저장함).
-        # list_dir 폴링 브라우저처럼 응답을 기다리는 UI가 아니라 그냥 큐잉이라 훨씬 안정적임
-        # (5d1ba12에서 실시간 왕복이 필요한 원격 탐색은 불안정해서 제거한 적 있음).
+        # 응답을 기다리는 UI가 아니라 그냥 큐잉이라 안정적임(찾아보기 버튼의 RemoteBrowseDialog는
+        # 실제로 응답을 기다리지만, 그건 가끔 쓰는 탐색 전용이고 여기 "적용"은 항상 즉시 성공함).
         server.queue_command(agent_id, {"type": "set_output_root", "path": path})
         self.worker_output_root_status.setText(f"적용 요청 보냄: {path} (반영까지 1~2초)")
         QTimer.singleShot(2000, self._refresh_worker_output_root_status)
+
+    def _on_browse_worker_output_root(self) -> None:
+        self._open_worker_browse_dialog("folders", self.worker_output_root_input)
 
     def _refresh_worker_model_path_status(self) -> None:
         agent_id = self._remote_agent_id
@@ -1196,6 +1206,18 @@ class InferenceTab(QWidget):
         server.queue_command(agent_id, {"type": "set_model_path", "path": path})
         self.worker_model_path_status.setText(f"적용 요청 보냄: {path} (반영까지 1~2초)")
         QTimer.singleShot(2000, self._refresh_worker_model_path_status)
+
+    def _on_browse_worker_model_path(self) -> None:
+        self._open_worker_browse_dialog("pt_files", self.worker_model_path_input)
+
+    def _open_worker_browse_dialog(self, mode: str, target_input: QLineEdit) -> None:
+        agent_id = self._remote_agent_id
+        server = CONTROL_CONTEXT.server
+        if agent_id is None or server is None:
+            return
+        dialog = RemoteBrowseDialog(server, agent_id, mode, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_path:
+            target_input.setText(dialog.selected_path)
 
     def _get_state(self, target_key: Optional[str]) -> _JobView:
         return self._states.setdefault(target_key, _JobView())
@@ -2653,6 +2675,141 @@ class SourceVerifyTab(QWidget):
         self.status_label.setText(f"Saved corrected JSON: {output_path}")
 
 
+class RemoteBrowseDialog(QDialog):
+    """워커 PC의 실제 폴더 구조를 보고 "워커 기본 저장/모델 경로"를 고를 수 있는 다이얼로그.
+
+    agent.py의 list_dir 명령(controlserver의 기존 명령 큐를 그대로 씀 - start_job/
+    set_output_root와 같은 검증된 경로)으로 비동기 왕복함: 이 프로세스(중앙 GUI) ->
+    server.queue_command -> 워커가 다음 폴링(최대 1초) 때 처리 -> /dirlist로 결과 보고 ->
+    같은 프로세스 안이라 server.take_dir_result(request_id)로 바로 꺼내옴(HTTP 왕복 불필요,
+    ControlServer가 GUI와 같은 프로세스에서 돎).
+
+    예전에 이런 실시간 원격 탐색기를 "매 작업 시작 전 소스/모델/출력을 매번 이걸로 골라야
+    하는" 용도로 썼다가 연결 불안정/"경로 못 찾음" 문제로 뺐음(5d1ba12) - 그때는 실패하면
+    작업 시작 자체가 막혔음. 지금은 가끔 설정하는 기본 경로 전용이라 응답이 없어도(타임아웃)
+    새로고침으로 재시도하거나 그냥 입력창에 직접 타이핑하면 되므로 부담이 훨씬 적음."""
+
+    _TIMEOUT_SECONDS = 8.0
+    _POLL_MS = 300
+
+    def __init__(self, server: controlserver.ControlServer, agent_id: str, mode: str, parent=None) -> None:
+        super().__init__(parent)
+        self._server = server
+        self._agent_id = agent_id
+        self._mode = mode  # "folders"(출력 폴더용) | "pt_files"(모델 pt용)
+        self._request_id: Optional[str] = None
+        self._request_started_at = 0.0
+        self._current_path = ""
+        self.selected_path: Optional[str] = None
+
+        self.setWindowTitle(f"워커({agent_id}) 경로 찾아보기")
+        self.resize(480, 420)
+
+        self.path_label = QLabel("(드라이브 목록)")
+        self.path_label.setWordWrap(True)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
+
+        up_button = QPushButton("상위 폴더")
+        up_button.clicked.connect(self._go_up)
+        refresh_button = QPushButton("새로고침")
+        refresh_button.clicked.connect(lambda: self._request_listing(self._current_path))
+        self.select_button = QPushButton("이 폴더 선택")
+        self.select_button.clicked.connect(self._select_current_folder)
+        self.select_button.setVisible(mode == "folders")
+        cancel_button = QPushButton("취소")
+        cancel_button.clicked.connect(self.reject)
+
+        nav_row = QHBoxLayout()
+        nav_row.addWidget(up_button)
+        nav_row.addWidget(refresh_button)
+        nav_row.addStretch(1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.select_button)
+        button_row.addWidget(cancel_button)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.path_label)
+        layout.addLayout(nav_row)
+        layout.addWidget(self.list_widget, stretch=1)
+        layout.addWidget(self.status_label)
+        layout.addLayout(button_row)
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(self._POLL_MS)
+        self._poll_timer.timeout.connect(self._check_result)
+
+        self._request_listing("")
+
+    def _request_listing(self, path: str) -> None:
+        self._request_id = uuid.uuid4().hex
+        self._request_started_at = time.time()
+        self.list_widget.clear()
+        self.list_widget.setEnabled(False)
+        self.select_button.setEnabled(False)
+        self.status_label.setText("탐색 중...")
+        self._server.queue_command(self._agent_id, {
+            "type": "list_dir", "requestId": self._request_id, "path": path, "mode": self._mode})
+        self._poll_timer.start()
+
+    def _check_result(self) -> None:
+        result = self._server.take_dir_result(self._request_id)
+        if result is None:
+            if time.time() - self._request_started_at > self._TIMEOUT_SECONDS:
+                self._poll_timer.stop()
+                self.list_widget.setEnabled(True)
+                self.select_button.setEnabled(bool(self._current_path))
+                self.status_label.setText(
+                    "응답이 없습니다 - 워커가 오프라인이거나 다른 작업 중일 수 있습니다. "
+                    "새로고침을 눌러 다시 시도하거나, 입력창에 직접 입력하세요.")
+            return
+        self._poll_timer.stop()
+        self.list_widget.setEnabled(True)
+        if "error" in result:
+            self.status_label.setText(f"오류: {result['error']}")
+            self.select_button.setEnabled(self._mode == "folders" and bool(self._current_path))
+            return
+        self._current_path = result.get("path", "")
+        self.path_label.setText(self._current_path or "(드라이브 목록)")
+        entries = result.get("entries", [])
+        for entry in entries:
+            self.list_widget.addItem(entry)
+        self.status_label.setText(f"{len(entries)}개 항목")
+        self.select_button.setEnabled(self._mode == "folders" and bool(self._current_path))
+
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        name = item.text()
+        if name.endswith("\\"):
+            new_path = name if not self._current_path else os.path.join(self._current_path, name)
+            self._request_listing(new_path)
+        else:
+            # 폴더가 아닌 항목은 mode="pt_files"일 때만 옴(.pt 파일) - 바로 선택하고 닫음.
+            self.selected_path = os.path.join(self._current_path, name)
+            self.accept()
+
+    def _go_up(self) -> None:
+        if not self._current_path:
+            return
+        stripped = self._current_path.rstrip("\\")
+        parent = os.path.dirname(stripped)
+        if not parent or parent == stripped:
+            self._request_listing("")  # 드라이브 루트까지 올라가면 드라이브 목록으로
+        else:
+            self._request_listing(parent + "\\")
+
+    def _select_current_folder(self) -> None:
+        if self._current_path:
+            self.selected_path = self._current_path
+            self.accept()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt 콜백 규약
+        self._poll_timer.stop()
+        super().closeEvent(event)
+
 
 class ControlContext(QObject):
     """전역 "지금 이 UI가 어느 PC를 조작 중인지" 상태. 왼쪽 ControlPanel에서 PC를 클릭하면
@@ -2733,8 +2890,19 @@ class ControlPanel(QWidget):
         self.worker_name_input.setPlaceholderText("비우면 이 PC 호스트명 사용")
         self.worker_connect_button = QPushButton("중앙에 접속(이 PC를 워커로)")
         self.worker_connect_button.clicked.connect(self._on_worker_connect_clicked)
+        # 중앙 PC를 껐다 켜면 agent.py 쪽은 최대 1초 안에 자동으로 재연결/재등록되지만
+        # (run_agent의 poll_failed 처리), 그래도 바로 안 잡힐 때를 대비한 수동 버튼(사용자
+        # 요청: "혹시라도 바로 연결 안 될 수도 있으니까 새로고침도 만들어줘") - 접속을 끊고
+        # 곧바로 다시 붙여서 등록부터 다시 함.
+        self.worker_reconnect_button = QPushButton("지금 재연결")
+        self.worker_reconnect_button.setEnabled(False)
+        self.worker_reconnect_button.clicked.connect(self._on_worker_reconnect_clicked)
         self.worker_status_label = QLabel("연결 안 됨")
         self.worker_status_label.setWordWrap(True)
+
+        worker_connect_row = QHBoxLayout()
+        worker_connect_row.addWidget(self.worker_connect_button, stretch=1)
+        worker_connect_row.addWidget(self.worker_reconnect_button)
 
         self.port_input = QLineEdit("8765")
         self.token_input = QLineEdit()
@@ -2752,6 +2920,11 @@ class ControlPanel(QWidget):
 
         self.pc_list = QListWidget()
         self.pc_list.itemClicked.connect(self._on_pc_clicked)
+        pc_list_refresh_button = QPushButton("새로고침")
+        pc_list_refresh_button.clicked.connect(self._refresh)
+        pc_list_header_row = QHBoxLayout()
+        pc_list_header_row.addWidget(QLabel("PC 목록 (클릭 = 제어 대상 전환)"), stretch=1)
+        pc_list_header_row.addWidget(pc_list_refresh_button)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -2765,7 +2938,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.worker_server_input)
         layout.addWidget(self.worker_token_input)
         layout.addWidget(self.worker_name_input)
-        layout.addWidget(self.worker_connect_button)
+        layout.addLayout(worker_connect_row)
         layout.addWidget(self.worker_status_label)
         layout.addWidget(QLabel("<b>중앙 제어</b>"))
         layout.addWidget(QLabel("포트"))
@@ -2776,7 +2949,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.server_status_label)
         layout.addWidget(QLabel("중앙 저장 경로"))
         layout.addLayout(central_output_row)
-        layout.addWidget(QLabel("PC 목록 (클릭 = 제어 대상 전환)"))
+        layout.addLayout(pc_list_header_row)
         layout.addWidget(self.pc_list, stretch=1)
         layout.addWidget(QLabel("선택한 PC 로그"))
         layout.addWidget(self.log_view, stretch=1)
@@ -2860,25 +3033,26 @@ class ControlPanel(QWidget):
             except OSError:
                 return "127.0.0.1"
 
-    def _on_worker_connect_clicked(self) -> None:
-        if self._agent_thread is not None:
-            self._agent_thread.stop()
-            self._agent_thread.wait(3000)
-            self._agent_thread = None
-            self.worker_status_label.setText("연결 안 됨")
-            self.worker_connect_button.setText("중앙에 접속(이 PC를 워커로)")
-            self.worker_server_input.setEnabled(True)
-            self.worker_token_input.setEnabled(True)
-            self.worker_name_input.setEnabled(True)
+    def _stop_agent_thread(self) -> None:
+        if self._agent_thread is None:
             return
+        # finished 시그널은 QueuedConnection이라 wait() 반환 후에도 나중에(다음 이벤트 루프
+        # 틱) 지연 전달될 수 있음 - 재연결(_on_worker_reconnect_clicked)처럼 여기서 바로 새
+        # 스레드를 만들면, 그 지연된 신호가 새 스레드를 엉뚱하게 정리해버릴 수 있어서(둘 다
+        # self._agent_thread를 참조) 미리 끊어둠.
+        with contextlib.suppress(TypeError, RuntimeError):
+            self._agent_thread.finished.disconnect(self._on_agent_thread_finished)
+        self._agent_thread.stop()
+        self._agent_thread.wait(3000)
+        self._agent_thread = None
+        self.worker_status_label.setText("연결 안 됨")
+        self.worker_connect_button.setText("중앙에 접속(이 PC를 워커로)")
+        self.worker_reconnect_button.setEnabled(False)
+        self.worker_server_input.setEnabled(True)
+        self.worker_token_input.setEnabled(True)
+        self.worker_name_input.setEnabled(True)
 
-        server_url = self.worker_server_input.text().strip()
-        token = self.worker_token_input.text().strip()
-        if not server_url or not token:
-            self.worker_status_label.setText("[오류] 중앙 PC 주소와 토큰을 입력하세요.")
-            return
-        agent_id = self.worker_name_input.text().strip() or socket.gethostname()
-
+    def _start_agent_thread(self, server_url: str, token: str, agent_id: str) -> None:
         self._agent_thread = _AgentThread(server_url, token, agent_id)
         self._agent_thread.status_changed.connect(self.worker_status_label.setText)
         # InferenceTab(6번 탭)이 이 신호들을 구독해서, 이 PC가 워커로 작업을 받으면 로컬
@@ -2890,9 +3064,34 @@ class ControlPanel(QWidget):
         self._agent_thread.finished.connect(self._on_agent_thread_finished)
         self._agent_thread.start()
         self.worker_connect_button.setText("접속 해제")
+        self.worker_reconnect_button.setEnabled(True)
         self.worker_server_input.setEnabled(False)
         self.worker_token_input.setEnabled(False)
         self.worker_name_input.setEnabled(False)
+
+    def _on_worker_connect_clicked(self) -> None:
+        if self._agent_thread is not None:
+            self._stop_agent_thread()
+            return
+
+        server_url = self.worker_server_input.text().strip()
+        token = self.worker_token_input.text().strip()
+        if not server_url or not token:
+            self.worker_status_label.setText("[오류] 중앙 PC 주소와 토큰을 입력하세요.")
+            return
+        agent_id = self.worker_name_input.text().strip() or socket.gethostname()
+        self._start_agent_thread(server_url, token, agent_id)
+
+    def _on_worker_reconnect_clicked(self) -> None:
+        # agent.py는 폴링 실패 후 재연결되면 자동으로 다시 등록하지만(최대 1초 지연), 그래도
+        # 바로 안 잡힐 때를 위한 수동 강제 재연결 - 접속을 끊었다가 같은 정보로 바로 다시 붙임.
+        if self._agent_thread is None:
+            return
+        server_url = self.worker_server_input.text().strip()
+        token = self.worker_token_input.text().strip()
+        agent_id = self.worker_name_input.text().strip() or socket.gethostname()
+        self._stop_agent_thread()
+        self._start_agent_thread(server_url, token, agent_id)
 
     def _on_agent_thread_finished(self) -> None:
         # 정상 stop()이든 예상 못한 예외든, 스레드가 끝나면 항상 UI를 리셋해서 다음 클릭이
@@ -2902,6 +3101,7 @@ class ControlPanel(QWidget):
         if self._agent_thread is not None:
             self._agent_thread = None
             self.worker_connect_button.setText("중앙에 접속(이 PC를 워커로)")
+            self.worker_reconnect_button.setEnabled(False)
             self.worker_server_input.setEnabled(True)
             self.worker_token_input.setEnabled(True)
             self.worker_name_input.setEnabled(True)

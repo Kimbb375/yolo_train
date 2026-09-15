@@ -108,9 +108,24 @@ def check_upload_extracts_and_blocks_zip_slip() -> None:
     print("OK: /upload 결과 압축 해제 + mirror_root 미설정시 무시 + zip slip 차단 검증.")
 
 
+def check_dir_result_store_and_take_is_single_use() -> None:
+    # RemoteBrowseDialog(main.py)가 list_dir 요청 결과를 request_id로 조회하는 경로 -
+    # take는 한 번 꺼내면 소비되어야 함(take_command와 같은 패턴).
+    server = controlserver.ControlServer(token="secret")
+    assert server.take_dir_result("req1") is None
+
+    server.store_dir_result("req1", {"path": "C:\\x", "entries": ["a\\"]})
+    result = server.take_dir_result("req1")
+    assert result is not None and result["entries"] == ["a\\"]
+    assert server.take_dir_result("req1") is None  # 한 번 꺼내면 소비됨
+
+    print("OK: list_dir 결과 저장/조회(한 번 소비) 검증.")
+
+
 if __name__ == "__main__":
     check_auth_and_register()
     check_unregister_marks_offline_immediately()
     check_command_queue_and_targeting()
     check_log_and_done()
     check_upload_extracts_and_blocks_zip_slip()
+    check_dir_result_store_and_take_is_single_use()
