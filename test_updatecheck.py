@@ -30,7 +30,7 @@ class _FakeResponse:
 
 
 def _with_fake_urlopen(payload: bytes):
-    def _fake_urlopen(url, timeout=None):
+    def _fake_urlopen(url, timeout=None, context=None):
         return _FakeResponse(payload)
     return _fake_urlopen
 
@@ -88,7 +88,7 @@ def check_silent_false_raises_on_network_failure() -> None:
     appversion.COMMIT_SHA = "abc123"
     real_urlopen = urllib.request.urlopen
 
-    def _raise(url, timeout=None):
+    def _raise(url, timeout=None, context=None):
         raise OSError("network unreachable")
 
     urllib.request.urlopen = _raise

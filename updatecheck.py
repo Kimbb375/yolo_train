@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import ssl
 import urllib.request
 import zipfile
 from typing import Optional
@@ -24,6 +25,17 @@ REPO = "Kimbb375/yolo_train"
 VERSION_URL = f"https://github.com/{REPO}/releases/latest/download/version.json"
 DOWNLOAD_URL = f"https://github.com/{REPO}/releases/latest/download/TrainingDataExtractor.zip"
 UPDATE_ZIP_URL = f"https://github.com/{REPO}/releases/latest/download/update.zip"
+
+try:
+    # 포터블 standalone CPython(uv가 받은 것, gpu_setup.py 참고)은 일반 python.org
+    # 설치본과 달리 OS 인증서 저장소를 못 찾아서 urlopen이 "CERTIFICATE_VERIFY_FAILED:
+    # unable to get local issuer certificate"로 실패하는 PC가 있었음(사용자 보고). certifi는
+    # ultralytics(requests)의 전이 의존성이라 이미 항상 설치돼 있음 - 그 CA 번들을 명시적으로
+    # 써서 이 PC의 인증서 저장소 상태와 무관하게 항상 검증 가능하게 함.
+    import certifi
+    _SSL_CONTEXT: Optional[ssl.SSLContext] = ssl.create_default_context(cafile=certifi.where())
+except ImportError:  # noqa: BLE001 - certifi가 없어도 기본 컨텍스트로 폴백
+    _SSL_CONTEXT = None
 
 
 def check_for_update(timeout: float = 5.0, silent: bool = True) -> Optional[dict]:
@@ -40,7 +52,7 @@ def check_for_update(timeout: float = 5.0, silent: bool = True) -> Optional[dict
         return None  # 로컬 개발 실행 - 체크 안 함
 
     try:
-        with urllib.request.urlopen(VERSION_URL, timeout=timeout) as response:
+        with urllib.request.urlopen(VERSION_URL, timeout=timeout, context=_SSL_CONTEXT) as response:
             data = json.load(response)
         latest_sha = data.get("sha", "")
         latest_version = data.get("version", "")
@@ -68,7 +80,7 @@ def apply_update(log=print, timeout: float = 30.0) -> bool:
     제약(gpu_setup.py 참고)으로 재시작해야 적용됨."""
     app_dir = os.path.dirname(os.path.abspath(__file__))
     log(f"[업데이트] {UPDATE_ZIP_URL} 받는 중...")
-    with urllib.request.urlopen(UPDATE_ZIP_URL, timeout=timeout) as response:
+    with urllib.request.urlopen(UPDATE_ZIP_URL, timeout=timeout, context=_SSL_CONTEXT) as response:
         data = response.read()
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         archive.extractall(app_dir)
