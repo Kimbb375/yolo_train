@@ -116,6 +116,40 @@ def check_run_job_forwards_output_and_done_locally() -> None:
     print("OK: _run_job이 on_output/on_done 콜백으로 서버 전송과 별개로 로컬에도 전달함.")
 
 
+def check_run_job_updates_activity_marker_on_real_output() -> None:
+    # run_agent의 liveness_pinger가 "10초 넘게 진짜 로그가 없었을 때만" 안내 메시지를
+    # 보내도록 판단하는 기준값 - 타일 처리 로그가 이미 자주 찍히고 있는데도 liveness
+    # 메시지를 또 얹어 보내던 문제(사용자 보고)를 막기 위한 신호.
+    class _FakeResult:
+        runRootPath = "run_root"
+
+        def to_display_text(self) -> str:
+            return "완료"
+
+    real_inference_run = inference.run
+    real_post = agent._post
+
+    def fake_inference_run(source, output, model, run_name, options):
+        print("processed 1/10", flush=True)
+        return _FakeResult()
+
+    inference.run = fake_inference_run
+    agent._post = lambda *a, **k: {}
+
+    marker = [0.0]
+    try:
+        agent._run_job(
+            "http://central", "tok", "agentA",
+            {"type": "start_job", "source": "s", "output": "o", "model": "m", "options": ""},
+            activity_marker=marker)
+    finally:
+        inference.run = real_inference_run
+        agent._post = real_post
+
+    assert marker[0] > 0.0
+    print("OK: 실제 진행 로그가 찍히면 activity_marker가 갱신됨.")
+
+
 def check_list_dir_entries_folders_and_pt_files() -> None:
     # 중앙 PC(RemoteBrowseDialog)가 워커의 실제 폴더 구조를 보고 "워커 기본 저장/모델 경로"를
     # 고를 수 있게 하는 기능(사용자 요청: "워커 pc경로를 직접 엑세스해서 경로선택 팝업창을
@@ -171,6 +205,7 @@ if __name__ == "__main__":
     check_resolve_output_root()
     check_resolve_model_path()
     check_run_job_forwards_output_and_done_locally()
+    check_run_job_updates_activity_marker_on_real_output()
     check_list_dir_entries_folders_and_pt_files()
     check_list_dir_entries_empty_path_lists_drives()
     check_handle_list_dir_posts_result()

@@ -196,18 +196,26 @@ def _upload_result(server: str, token: str, agent_id: str, run_root: str) -> Non
 
 
 def _run_job(server: str, token: str, agent_id: str, command: dict,
-             on_output=None, on_done=None) -> None:
+             on_output=None, on_done=None, activity_marker=None) -> None:
     """job type별로 실제 작업을 실행함. inference/training 둘 다 print()로 진행 상황을
     내보내므로 stdout을 여기서 한 번만 가로채서(_TeeToServer) 서버 /log 로 올림.
 
     on_output/on_done: 이 워커 PC 자체가 GUI로 떠 있는 경우(main.py의 "이 PC를 워커로
     접속"), 서버로 보내는 것과 별개로 이 프로세스 안의 InferenceTab에도 같은 로그/완료를
     바로 보여주기 위한 콜백(사용자 요청: "중앙 제어는 컨트롤만, 워커 PC에서도 추론
-    페이지처럼 작업 도는 게 보이게"). CLI(--agent)로 콘솔만 띄운 경우엔 None."""
+    페이지처럼 작업 도는 게 보이게"). CLI(--agent)로 콘솔만 띄운 경우엔 None.
+
+    activity_marker: [timestamp] 형태의 1칸짜리 리스트 - 실제 진행 로그가 찍힐 때마다
+    현재 시각으로 갱신함. run_agent의 liveness_pinger가 이걸로 "최근에 진짜 로그가 있었는지"
+    판단해서, 타일 처리 로그가 이미 자주 찍히고 있는데도 10초마다 "여전히 실행 중입니다"를
+    또 얹어 보내는 걸 막음(사용자 보고: "10초마다 뜨는 이 메시지는 안 띄워도 될 거 같다 -
+    추론이 안 돌아가고 있을 때만 띄워달라")."""
     def send_lines(text: str) -> None:
         lines = [ln for ln in text.split("\n") if ln]
         if not lines:
             return
+        if activity_marker is not None:
+            activity_marker[0] = time.time()
         with contextlib.suppress(Exception):
             _post(server, token, "/log", {"agentId": agent_id, "lines": lines})
         if on_output is not None:
@@ -289,22 +297,29 @@ def run_agent(server: str, token: str, agent_id: str,
     # 스레드로 돌려서 폴링 루프는 항상 1초마다 하트비트를 계속 보내게 분리함.
     busy_event = threading.Event()
     job_started_at = [0.0]
+    last_output_at = [0.0]
     liveness_stop = threading.Event()
 
     def run_job_in_background(command: dict) -> None:
         try:
-            _run_job(server, token, agent_id, command, on_output=on_job_output, on_done=on_job_done)
+            _run_job(server, token, agent_id, command, on_output=on_job_output, on_done=on_job_done,
+                     activity_marker=last_output_at)
         finally:
             busy_event.clear()
 
     def liveness_pinger() -> None:
         # TensorRT engine 빌드처럼 네이티브 라이브러리가 오래 블로킹하면서 print()를 전혀
         # 안 하는 구간이 있음 - 중앙 Summary 로그에 몇 분씩 새 줄이 안 뜨면 멈춘 것처럼
-        # 보임(사용자 보고). 10초마다 "아직 실행 중" 한 줄을 올려서 살아있음을 보여줌.
+        # 보임(사용자 보고). 그런 무응답 구간에서만 10초마다 "아직 실행 중" 한 줄을 올림 -
+        # 원래도 그 의도였는데, 실제로는 타일 처리 로그가 이미 자주 찍히고 있어도 무조건
+        # 10초마다 또 얹어 보내고 있었음(사용자 보고: "이 메시지는 실행 중이 아닐 때만
+        # 띄워달라"). last_output_at(실제 진행 로그가 찍힌 마지막 시각)이 10초 넘게 안
+        # 갱신됐을 때만(=진짜 조용한 구간일 때만) 보냄.
         last_ping = 0.0
         while not liveness_stop.is_set():
-            if busy_event.is_set() and time.time() - last_ping > 10:
-                elapsed = int(time.time() - job_started_at[0])
+            now = time.time()
+            if (busy_event.is_set() and now - last_output_at[0] > 10 and now - last_ping > 10):
+                elapsed = int(now - job_started_at[0])
                 with contextlib.suppress(Exception):
                     _post(server, token, "/log", {
                         "agentId": agent_id,
@@ -358,6 +373,7 @@ def run_agent(server: str, token: str, agent_id: str,
                 on_job_started(label)
             busy_event.set()
             job_started_at[0] = time.time()
+            last_output_at[0] = time.time()
             threading.Thread(target=run_job_in_background, args=(command,), daemon=True).start()
         elif command and command.get("type") == "set_output_root":
             _output_root_override = (command.get("path") or "").strip() or None
