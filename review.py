@@ -336,6 +336,69 @@ def load_confirmed_records(review_output_root: str) -> list[dict]:
     return confirmed
 
 
+def export_reviewed_boxes(review_output_root: str) -> str:
+    """이 차수 검수 결과(confirmed/negative 둘 다)에서 sourceTifName+globalBox+status만
+    모아 review_output_root/reviewed_boxes.json으로 내보냄. 다음 차수 검수에서
+    candidates.json처럼 파일로 불러와 중복 제외하는 데 씀. 저장 경로 반환."""
+    boxes = []
+    for status in ("confirmed", "negative"):
+        status_root = os.path.join(review_output_root, status)
+        if not os.path.isdir(status_root):
+            continue
+        individual = []
+        for name in sorted(os.listdir(status_root)):
+            if name.lower().startswith(status + "_") and name.lower().endswith(".json"):
+                individual.extend(_load_review_record_file(os.path.join(status_root, name)))
+        jsonl_path = os.path.join(status_root, "records.jsonl")
+        records = individual if individual else (
+            _load_review_record_file(jsonl_path) if os.path.isfile(jsonl_path) else [])
+
+        latest: dict[tuple, dict] = {}
+        for record in records:
+            latest[_record_key(record)] = record  # 나중 것이 이전 것을 덮어씀(입력 순서가 시간 순서라고 가정)
+        boxes.extend({"sourceTifName": r["sourceTifName"], "globalBox": r["globalBox"], "status": status}
+                     for r in latest.values() if r.get("status") == status)
+
+    output_path = os.path.join(review_output_root, "reviewed_boxes.json")
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(boxes, fh, ensure_ascii=False, indent=2)
+    return output_path
+
+
+def load_reviewed_boxes(path: str) -> list[dict]:
+    """export_reviewed_boxes가 만든 JSON 파일을 읽음 - candidates.json처럼 파일 하나로 다룸."""
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _box_iou(a: dict, b: CoordinateBox) -> float:
+    """compare.py _iou와 같은 계산식(순환 import 피하려고 따로 둠) - dict globalBox vs CoordinateBox 비교."""
+    left, top = max(a["left"], b.left), max(a["top"], b.top)
+    right, bottom = min(a["right"], b.right), min(a["bottom"], b.bottom)
+    intersection = max(0, right - left) * max(0, bottom - top)
+    union = (a["right"] - a["left"]) * (a["bottom"] - a["top"]) + b.width * b.height - intersection
+    return 0.0 if union <= 0 else intersection / union
+
+
+def exclude_previously_reviewed(
+    candidates: list[ReviewCandidate], previous_boxes: list[dict], iou_threshold: float = 0.5
+) -> tuple[list[ReviewCandidate], int]:
+    """같은 sourceTifName + IoU>=임계값이면 이전 차수에서 이미 고래/고래아님으로 분류된
+    것으로 보고 제외. 반환: (남은 후보, 제외된 개수)."""
+    by_source: dict[str, list[dict]] = {}
+    for record in previous_boxes:
+        by_source.setdefault(record["sourceTifName"].lower(), []).append(record["globalBox"])
+
+    kept, excluded = [], 0
+    for candidate in candidates:
+        previous = by_source.get(candidate.sourceTifName.lower(), [])
+        if any(_box_iou(box, candidate.globalBox) >= iou_threshold for box in previous):
+            excluded += 1
+        else:
+            kept.append(candidate)
+    return kept, excluded
+
+
 def _leading_digits(value: str) -> str:
     result = []
     for ch in value or "":

@@ -125,7 +125,40 @@ def check_export_object_db() -> None:
     print("OK: export_confirmed_object_db가 object_db_new.json 통합 출력(confirmed만) 생성.")
 
 
+def check_exclude_previously_reviewed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        candidate_json_path, _ = _build_candidates_json(tmp)
+        candidates = review.load_candidates(candidate_json_path)
+        output_root = os.path.join(tmp, "round1_output")
+
+        # 1차 검수: candidate 1(고래)은 확정, candidate 2(고래 아님)는 negative로 처리.
+        review.save_confirmed(candidates[0], output_root)
+        review.save_negative(candidates[1], output_root)
+
+        previous_path = review.export_reviewed_boxes(output_root)
+        assert previous_path == os.path.join(output_root, "reviewed_boxes.json")
+        previous_boxes = review.load_reviewed_boxes(previous_path)
+        assert {b["status"] for b in previous_boxes} == {"confirmed", "negative"}
+
+        # 2차 추론에서 같은 두 개체(거의 같은 박스) + 새 개체 1개가 나왔다고 가정.
+        same_source = candidates[0].sourceTifName
+        round2 = [
+            candidates[0],  # candidate 1과 완전히 같은 박스 -> confirmed와 매칭돼 제외
+            candidates[1],  # candidate 2와 완전히 같은 박스 -> negative와 매칭돼 제외
+            review.ReviewCandidate(99, "src", same_source, candidates[0].sourceTifPath, "tile", 0.9,
+                                    CoordinateBox(900, 900, 940, 940, 40, 40),
+                                    CoordinateBox(900, 900, 940, 940, 40, 40), "", "", ""),
+        ]
+        kept, excluded_count = review.exclude_previously_reviewed(round2, previous_boxes)
+        assert excluded_count == 2
+        assert [c.candidateId for c in kept] == [99]
+
+    print("OK: export_reviewed_boxes -> load_reviewed_boxes -> exclude_previously_reviewed로 "
+          "이전 차수에서 이미 분류된 개체가 다음 차수 검수에서 제외됨을 검증.")
+
+
 if __name__ == "__main__":
     check_load_and_filter()
     check_confirm_negative_delete_cycle()
     check_export_object_db()
+    check_exclude_previously_reviewed()

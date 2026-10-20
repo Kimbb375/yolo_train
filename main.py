@@ -1761,6 +1761,8 @@ class ReviewTab(QWidget):
 
         self.candidate_json_input = QLineEdit()
         self.output_root_input = QLineEdit()
+        self.previous_round_input = QLineEdit()
+        self.previous_round_input.setPlaceholderText("예: ...\\reviewed_boxes.json (비우면 제외 안 함)")
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(self.DEFAULT_FILTER_HINT)
         self.filter_input.textChanged.connect(self._update_filter_status_label)
@@ -1784,6 +1786,13 @@ class ReviewTab(QWidget):
         form.addWidget(QLabel("검수 출력 폴더"), 1, 0)
         form.addWidget(self.output_root_input, 1, 1)
         form.addWidget(self._browse_button(self._pick_output_root), 1, 2)
+
+        form.addWidget(QLabel("이전 차수 결과"), 2, 0)
+        form.addWidget(self.previous_round_input, 2, 1)
+        form.addWidget(self._browse_button(self._pick_previous_round), 2, 2)
+        export_previous_round_button = QPushButton("이전 차수 결과로 내보내기")
+        export_previous_round_button.clicked.connect(self._on_export_previous_round_clicked)
+        form.addWidget(export_previous_round_button, 2, 3)
 
         load_row = QHBoxLayout()
         load_button = QPushButton("불러오기")
@@ -1864,6 +1873,22 @@ class ReviewTab(QWidget):
         if path:
             self.output_root_input.setText(path)
 
+    def _pick_previous_round(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "이전 차수 결과 JSON 선택", "", "JSON (*.json)")
+        if path:
+            self.previous_round_input.setText(path)
+
+    def _on_export_previous_round_clicked(self) -> None:
+        if not self._output_root():
+            self.status_label.setText("[오류] 검수 출력 폴더를 지정하세요.")
+            return
+        try:
+            path = review.export_reviewed_boxes(self._output_root())
+        except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
+            self.status_label.setText(f"[오류] {exc}")
+            return
+        self.status_label.setText(f"이전 차수 결과 저장됨: {path} (다음 차수에서 '이전 차수 결과'로 불러오면 됨)")
+
     def _on_load_clicked(self) -> None:
         candidate_json_path = self.candidate_json_input.text().strip()
         if not candidate_json_path:
@@ -1873,9 +1898,15 @@ class ReviewTab(QWidget):
         # 다시 불러오기/필터 적용을 누를 수 있음 - 그때마다 1번으로 되돌아가면 번거로우니
         # 지금 보던 후보(candidateId)를 새 목록에서 다시 찾아 그 자리를 유지함.
         current_candidate_id = self._current().candidateId if self._current() else None
+        previous_round_path = self.previous_round_input.text().strip()
         try:
             all_candidates = review.load_candidates(candidate_json_path)
             self._candidates = review.apply_filters(all_candidates, self.filter_input.text())
+            excluded_count = 0
+            if previous_round_path:
+                previous_boxes = review.load_reviewed_boxes(previous_round_path)
+                self._candidates, excluded_count = review.exclude_previously_reviewed(
+                    self._candidates, previous_boxes)
         except Exception as exc:  # noqa: BLE001 - UI 레이어, 사용자에게 원인 그대로 보여줌
             self.status_label.setText(f"[오류] {exc}")
             return
@@ -1883,7 +1914,10 @@ class ReviewTab(QWidget):
         self.position_slider.blockSignals(True)
         self.position_slider.setRange(0, max(0, len(self._candidates) - 1))
         self.position_slider.blockSignals(False)
-        self.status_label.setText(f"{len(all_candidates)}개 중 {len(self._candidates)}개 표시 (필터 적용됨)")
+        status_text = f"{len(all_candidates)}개 중 {len(self._candidates)}개 표시 (필터 적용됨)"
+        if previous_round_path:
+            status_text += f", 이전 차수 중복 제외: {excluded_count}개"
+        self.status_label.setText(status_text)
         self.image_label.setFocus()
         self._refresh()
 
