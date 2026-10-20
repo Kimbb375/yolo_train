@@ -366,9 +366,20 @@ def export_reviewed_boxes(review_output_root: str) -> str:
 
 
 def load_reviewed_boxes(path: str) -> list[dict]:
-    """export_reviewed_boxes가 만든 JSON 파일을 읽음 - candidates.json처럼 파일 하나로 다룸."""
+    """export_reviewed_boxes가 만든 JSON 파일을 읽음 - candidates.json처럼 파일 하나로 다룸.
+    candidates.json/object_db_new.json 같은 다른 JSON을 잘못 골랐을 때 밑에서(exclude_
+    previously_reviewed) "string indices must be integers" 같은 알아보기 힘든 에러로
+    터지는 대신 여기서 바로 원인을 알려줌."""
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, list) or not all(
+        isinstance(r, dict) and "sourceTifName" in r and "globalBox" in r for r in data
+    ):
+        raise ValueError(
+            "이전 차수 결과 JSON 형식이 아닙니다. candidates.json이 아니라 "
+            "'이전 차수 결과로 내보내기'로 만든 reviewed_boxes.json을 선택하세요."
+        )
+    return data
 
 
 def _box_iou(a: dict, b: CoordinateBox) -> float:

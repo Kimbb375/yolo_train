@@ -140,6 +140,14 @@ def check_exclude_previously_reviewed() -> None:
         previous_boxes = review.load_reviewed_boxes(previous_path)
         assert {b["status"] for b in previous_boxes} == {"confirmed", "negative"}
 
+        # candidates.json(다른 형식의 JSON)을 잘못 골랐을 때 깊은 데서 "string indices must
+        # be integers" 같은 알아보기 힘든 에러 대신 바로 명확한 ValueError로 걸러져야 함.
+        try:
+            review.load_reviewed_boxes(candidate_json_path)
+            assert False, "should have raised"
+        except ValueError:
+            pass
+
         # 2차 추론에서 같은 두 개체(거의 같은 박스) + 새 개체 1개가 나왔다고 가정.
         same_source = candidates[0].sourceTifName
         round2 = [
